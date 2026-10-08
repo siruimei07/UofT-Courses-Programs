@@ -994,9 +994,9 @@ export const DEFAULT_GEOMETRY_OPTIONS: GeometryOptions = {
   laneMinHeight: 64,             // lane label block: name line + meta line with bullet + padding (9.1)
   laneSlimHeight: 30,            // NEW: lane whose visible nodes are all `mini`
   laneCollapsedHeight: 0,        // lane whose nodes are all `hidden` ("Hide unrelated", filters)
-  bandPadLeft: 14,               // NEW
-  bandPadRight: 10,              // NEW: replaces the last column's trailing gap
-  columnGap: 28,                 // label end → next column's left edge (8 label pad + 20)
+  bandPadLeft: 10,               // NEW (tuning step 2: was 14)
+  bandPadRight: 8,               // NEW: replaces the last column's trailing gap (tuning step 2: was 10)
+  columnGap: 24,                 // label end → next column's left edge (8 label pad + 16; tuning step 1: was 28)
   miniColumnGap: 6,              // NEW: after a mini-only column
   colWidth: { full: 212, compact: 104, mini: 22 },   // maxima of one track; measured widths shrink them
   rowHeight: { full: 40, compact: 22, mini: 8 },
@@ -1005,10 +1005,10 @@ export const DEFAULT_GEOMETRY_OPTIONS: GeometryOptions = {
   miniGapAbove: 6,               // NEW: gap between the last labelled row and the mini grid
   miniPerRowMax: 10,             // NEW
   cellMaxHeight: { full: 720, compact: 440 },        // CHANGED to per class: wrap threshold
-  trackGap: 8,                   // between wrapped tracks of one column (vs columnGap 28)
+  trackGap: 8,                   // between wrapped tracks of one column (vs columnGap 24)
   dotInset: 8,                   // dot centre from the column's left edge
   labelX: 20,                    // NEW: label start from the column's left edge
-  fullLabelMax: 184,             // NEW: max measured title or code width in a full label
+  fullLabelMax: 172,             // NEW: max measured title or code width in a full label (tuning step 3: was 184)
 }
 ```
 
@@ -1034,6 +1034,14 @@ else:
 If a target still fails after step 3, that frame falls back to the next priority window (10.2,
 step 4) plus edge-of-view pills. Record the outcome in the test as a known limit. Never lower the
 0.92 floor or the type sizes to make a fit pass.
+
+Outcome (2026-10-08, real Segoe UI measured in Chromium, `tests/graph-geometry.test.ts`): all three
+steps are applied above. The CSC148H5 chain with chain titles "direct" narrows from 1515 to 1426
+world px, still about 2 % over the 1398 px that 1920 × 1080 with the panel open allows at 0.92, so
+that frame uses window 1 (1062 px, fits). At 1536 × 864 window 2 (1062 px) exceeds the 1046 px
+allowed, so the frame centres the focus and the pills count the rest. With columnGap 24 the track
+gap equals a third of the column gap: a label end is 24 px from the next track's dot and 32 px from
+the next column's.
 
 ### 8.2 Display classes per state
 
@@ -1180,12 +1188,32 @@ Truncation (all but the focus):
 - **Curve:** a cubic Bézier from `(x_out, y1)` to `(x_in, y2)` with
   `c1 = (x_out + k, y1)`, `c2 = (x_in − k, y2)` and `k = clamp(0.45 · (x_in − x_out), 16, 240)`.
   Tangents are horizontal at both ends. B's long straight diagonals are not used.
-- **Wrapped source track (not the last track):**
-  1. Step half a row into the row gap on the side of the target: an S of 14 px horizontal run.
-  2. Run along that gap to the column's out-port.
-  3. Curve from there.
-- **Wrapped target track (not the first):** arrive in the row gap and S-step 14 px into the row
-  just before the dot.
+- **Wrapped tracks never look linked inside their column** (product rule; revised 2026-10-08 by
+  the integration pass after visual QA found the 14 px S-steps in the 24 px between a label and the
+  next track's dot reading as links between two courses of one column):
+  - **Wrapped source track (not the last track):**
+    1. Right after its own label (the leader start, labelEnd + 4; + 2 for faint edges), S-step into
+       the row gap on the side of the target. The run is at most 14 px and ends at least 8 px
+       before the next track's dot column, so the step reads as leaving its own label and never
+       as a tick towards the neighbour on its row.
+    2. Run along that gap to the column's out-port.
+    3. Curve from there.
+  - **Wrapped target track (not the first):** arrive in the row gap at the column's entry, run
+    along it to just before the dot's x, then turn a quarter circle (radius ≤ 6) and drop straight
+    into the dot's top or bottom edge (`cy ∓ (r + 1)`). No stroke lies on its row between the
+    previous track's label and its dot.
+  - **Gap slots:** each row gap has two slots 3 px apart, one next to each neighbouring row (full
+    rows: ± 1.5 px from the gap centre; compact rows too: anchor pieces clear label and dot boxes
+    inflated by 1 px instead of 2). Per row of a cell, the router assigns its anchors the slots that
+    place the most of them, then face their far ends. A source's run and a target's run may never
+    share a slot where they overlap (they would read as one line from one course of the column to
+    another); two sources whose edges all end at one target, or two targets whose edges all come from
+    one source, may (a bus of related edges). Left-over anchors take the neighbour row's slot where
+    it is free.
+  - **Dense cells:** where no slot is free, a faint overview edge stops at the column edge with a
+    stub terminal dot (8.10) instead (18 ends of 4,367 faint edges on the UTM data). Routed chains
+    of 170+ highlighted edges in the densest lanes keep a pinned number of meeting runs (known limit,
+    `tests/graph-routes.test.ts`).
 
 ### 8.8 Corridor routing
 
@@ -1223,9 +1251,14 @@ Same-row links that skip columns always go through B or C. B's "bypass arch" is 
 
 - Applies when the focus has 6 or more direct edges in one direction (ECO200Y5: 41 unlocks;
   PSY100Y5: 64; STA256H5: 52; SOC221H5 and SOC222H5: 110).
-- Group the targets by target column. For each group of 3 or more targets:
+- Group the targets by target column, lane and edge kind (revised 2026-10-08, integration pass:
+  a trunk never mixes prerequisites with corequisites, which drew optional corequisites solid and
+  sent ECO200Y5's required ECO101H5 / ECO102H5 on a detour to the MAT corequisites' median; and one
+  split point never serves several lanes, which made a vertical rail along the column's entries).
+  For each group of 3 or more targets:
   1. Draw a **trunk** from the focus out-port to a split point at `x = targetCol.x − 22`,
-     `y = clamp(median target cy, min cy, max cy)` of the group. Width 2.6.
+     `y = clamp(median target cy, min cy, max cy)` of the group. Width 2.6, dashed when the group's
+     edges are corequisites.
   2. From the split point, draw a 1.4 px **branch** to each target, with `k = 0.5 · dx`.
 - Groups of 1–2 targets are drawn normally.
 - Trunk start points are staggered by 3 px per group around the focus `cy`, sorted by group
@@ -1238,7 +1271,15 @@ Same-row links that skip columns always go through B or C. B's "bypass arch" is 
 ### 8.10 Overview long-edge stubs and hover preview
 
 - **Long edge:** in the overview (no focus, no program) with Show all connections off, an edge is
-  long when its endpoints are 3 or more visible lanes apart in display order.
+  long when its endpoints are 3 or more visible lanes apart in display order, or when the vertical
+  distance between its endpoints exceeds 320 world px (tall lanes otherwise produce grey ropes).
+- **Wrapped tracks:** faint edges, stubs and hover previews use the same anchor maths as routed
+  edges (`plainEdgePaths` / `plainEdgeStubs` in `routes.ts`, 8.7): an edge leaving a track that is
+  not the last one steps into the row gap right after its label and runs to the column out-port; an
+  edge into a later track arrives along a row gap and drops into the dot from above or below. The
+  row-gap slots are planned over the whole faint picture (`planWith`), so the same edge keeps its
+  anchors in the faint layer, the stubs and the hover preview, and no source's run meets a target's
+  run (product rule: no edge inside one column).
 - **Stub drawing:**
   - At the source: a 14 px horizontal stub from the out-port, ending in a 1.5 px-radius terminal
     dot.
@@ -1414,9 +1455,19 @@ Expected results (acceptance targets in 16.2):
 
 | Case | Expected framing |
 |---|---|
-| 1920 × 1080, panel open, CSC148H5 | The full chain, 100 through 400 level, at ≥ 0.92. Transitive nodes are compact. |
-| 1536 × 864, panel open, CSC148H5 | Focus, CSC108H5 and every direct unlock (STA246H5 included) at ≥ 0.92, with a right-edge pill for the later unlocks. |
+| 1920 × 1080, panel open, CSC148H5 | The chain from 100 through 400 level across the width, at ≥ 0.92 (8.1 outcome: window 1). Transitive nodes are compact. No left or right pill; unlocks in distant lanes get the bottom pill (known limit below). |
+| 1536 × 864, panel open, CSC148H5 | Focus and CSC108H5 at ≥ 0.92 with no pill counting a prerequisite, a right-edge pill for the later unlocks, and a bottom pill for the direct unlocks below the plot (STA246H5, known limit below). |
 | MAT232H5, both frames | Every prerequisite, including MAT102H5 and MAT157H5 at the far left, is visible. C cut these off. |
+
+**Known limit: vertical reach (integration decision, 2026-10-08).** The CSC148H5 rows first asked for
+the whole chain (1920) and for STA246H5 (1536) on screen. Neither fits vertically in Grey-dots mode
+with the owner's lane order (19.1) and 30 px slim lanes (19.4): LIN340H5 / LIN341H5 sit in the
+Linguistics lane (Humanities) far below the CSC lane, and at zoom 0.92 the Applied Statistics lane
+starts about 680 px below the CSC focus row while the 1536 × 864 plot is 582 px tall. No framing can
+meet those rows without changing a final owner decision, so the rows above state what framing
+guarantees, and the bottom pill (10.3) counts the rest; one click on it pans them into view. With Hide
+unrelated, the full CSC148H5 chain fits at 1920 (98 %). `tests/e2e/selection.spec.ts` asserts these
+rows.
 
 ### 10.3 Edge-of-view indicators
 
@@ -1426,6 +1477,9 @@ Expected results (acceptance targets in 16.2):
   never over the sticky headers.
   - Left and right pills are vertically centred on the focus row (clamped).
   - Top and bottom pills are horizontally centred on the focus column.
+  - A pill never covers a visible chain label, the focus with its plate, or another pill: it slides
+    along its edge to the nearest free position (6 px steps, 4 px clear of labels, 6 px of pills).
+    Where no position is free, the one covering least wins.
 - Counts: chain nodes whose dots are outside the plot, per side. At most one pill per side.
 - Copy:
   - "← 2 earlier prerequisites"
@@ -1769,3 +1823,22 @@ The owner delegated these choices; they are final for V1.
 6. **Fonts:** no web fonts are loaded and nothing is self-hosted. The stack is
    `"Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif` (Inter is dropped); Windows is
    the target and Segoe UI Variable has a plain zero.
+7. **Program + focus:** program courses outside the selected chain are `compact` with the amber
+   program ring (7.3), hidden with Hide unrelated.
+8. **Lane tones:** a subject's tone is stable everywhere: tones alternate within each division in
+   static lane order (`laneTone` in the graph core); filters never recolour a subject.
+9. **Enrolment-priority restrictions** ("Priority is given to students enrolled in …") are shown as
+   enrolment notes and do not make a course "unknown"; any other restriction text does.
+10. **Wrapping only in the overview:** while a course or a program is selected (dimming active),
+    labelled cells never wrap into tracks — a tall chain cell makes a tall lane, and framing plus
+    edge-of-view pills cover what is off-screen. Every highlighted edge therefore enters its target
+    dot straight from the left and can never look like a link inside one column.
+11. **Overview inner-track links are stubs:** in the overview, an edge whose source sits in a
+    track that is not the last one of its wrapped cell, or whose target sits in a track that is not
+    the first one, is drawn only as a short stub with a terminal dot inside that track's own gap (it
+    never crosses another track of the same column). Hovering a node previews its links in full.
+12. **Column gap 28:** `columnGap` returns to 28 for smoother curves and fewer vertical buses in
+    narrow gutters; where a chain is wider than the plot, framing falls back to the priority windows
+    and pills (10.2).
+13. **Motion on:** the section 17 motion is enabled by default and switched off under
+    `prefers-reduced-motion: reduce`.

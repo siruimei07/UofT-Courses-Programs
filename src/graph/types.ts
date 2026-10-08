@@ -228,6 +228,11 @@ export interface LaneBox {
   collapsed: boolean
   /** Dimming is active and every visible node of the lane is `mini`. */
   slim: boolean
+  /**
+   * This lane carries its division's label (+divisionLabelHeight): the first lane of the division
+   * in display order that is neither collapsed nor slim. The lane column uses the same flag.
+   */
+  divisionLabel: boolean
 }
 
 export interface BandBox {
@@ -254,7 +259,7 @@ export type PathSegment =
   | { op: 'C'; x1: number; y1: number; x2: number; y2: number; x: number; y: number }
 
 export interface RoutedPath {
-  /** Index into Topology.edges, or -1 for a bundle trunk. */
+  /** Index into Topology.edges, or -1 for a bundle trunk or a fork stub. */
   edge: number
   role: EdgeRole
   kind: EdgeKind

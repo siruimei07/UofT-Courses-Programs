@@ -32,8 +32,12 @@ export interface EvalNode {
 }
 
 export interface ExclusionCheck {
+  /**
+   * 'blocked' only when a parsed exclusion leaf matches the record; matches found only in
+   * unparsed text or among codes absent from this calendar give 'unknown' ("may exclude").
+   */
   status: 'clear' | 'blocked' | 'unknown'
-  /** Completed or in-progress courses that trigger the exclusion. */
+  /** Completed or in-progress courses that trigger (or may trigger) the exclusion. */
   blockedBy: string[]
 }
 
@@ -74,7 +78,7 @@ export interface NextCourse {
   groups: string[]
   /** How many other program courses list it as a prerequisite. */
   unlocks: number
-  reason: 'ready' | 'needs-prerequisites' | 'check-requirements'
+  reason: 'ready' | 'needs-prerequisites' | 'needs-corequisites' | 'check-requirements'
 }
 
 export interface CourseEngine {

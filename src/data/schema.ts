@@ -107,6 +107,10 @@ export interface ProgramGroupLite {
   text: string
   rule: Rule
   ids: string[]
+  /** Codes the group text rules out or only mentions ("except CSC392H5"); never highlighted. */
+  mentioned?: string[]
+  /** Same-campus codes absent from this calendar. */
+  unresolved?: string[]
 }
 
 export interface ProgramLite {
@@ -115,6 +119,8 @@ export interface ProgramLite {
   title: string
   /** Official type: Specialist, Major, Minor, Certificate, Focus, ... */
   type: string
+  /** 'url-slug' when the calendar gives no POSt code and `code` is the page slug (do not show it as a code). */
+  codeSource?: 'url-slug'
   sourceUrl: string
   description: string
   notes?: string
