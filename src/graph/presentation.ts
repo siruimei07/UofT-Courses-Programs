@@ -41,16 +41,31 @@ interface Context {
   directPreds: ReadonlySet<number>
   directSuccs: ReadonlySet<number>
   inProgram: readonly boolean[]
-  cls: readonly DisplayClass[]
+  /** A program with at least one course is active (an empty program set behaves like none). */
+  program: boolean
   dimming: boolean
 }
 
+/**
+ * Display classes follow design-spec 8.2:
+ * - overview: `compact`, or `full` with the Titles toggle;
+ * - course selected: focus, direct prerequisites and direct unlocks `full`; transitive chain nodes
+ *   `full` when chain titles resolve to 'all' (or Titles is on), `compact` otherwise;
+ * - program only: program courses `full`;
+ * - everything else while dimming: `mini`, or `hidden` with Hide unrelated. During a selection
+ *   program courses outside the chain are such "everything else"; they keep `inProgram` (and the
+ *   `program` role) so the renderer can still ring them;
+ * - level, subject and Hide completed filters hide nodes by their own level / subject / record,
+ *   but never the focus.
+ */
 export function computePresentation(topology: Topology, input: PresentationInput): Presentation {
   const focus = input.focusId === null ? -1 : topology.indexById.get(input.focusId) ?? -1
   const hasFocus = focus >= 0
-  const dimming = hasFocus || input.programIds !== null
-  const inProgram = topology.nodes.map(node => input.programIds?.has(node.id) ?? false)
-  const ctx: Omit<Context, 'cls'> = {
+  const programIds = input.programIds && input.programIds.size > 0 ? input.programIds : null
+  const program = programIds !== null
+  const dimming = hasFocus || program
+  const inProgram = topology.nodes.map(node => programIds?.has(node.id) ?? false)
+  const ctx: Context = {
     input,
     focus,
     ancestors: hasFocus ? collectAncestors(topology, focus, input.depth) : EMPTY,
@@ -58,6 +73,7 @@ export function computePresentation(topology: Topology, input: PresentationInput
     directPreds: hasFocus ? new Set(topology.preds[focus]) : EMPTY,
     directSuccs: hasFocus ? new Set(topology.succs[focus]) : EMPTY,
     inProgram,
+    program,
     dimming,
   }
 
@@ -65,19 +81,29 @@ export function computePresentation(topology: Topology, input: PresentationInput
   const record = topology.nodes.map(node => input.record.get(node.id) ?? null)
   const eligibility = topology.nodes.map((node, i) =>
     record[i] === 'completed' || record[i] === 'inProgress' ? null : input.eligibility?.get(node.id) ?? null)
+  const transitive: DisplayClass = input.chainTitles === 'all' || input.titles ? 'full' : 'compact'
   const cls = topology.nodes.map((node, i): DisplayClass => {
     if (i !== focus && filteredOut(node.level, node.subject, record[i], input)) return 'hidden'
-    if (!dimming) return 'compact'
-    if (role[i] !== 'none') return 'full'
+    if (!dimming) return input.titles ? 'full' : 'compact'
+    switch (role[i]) {
+      case 'focus':
+      case 'prereq-direct':
+      case 'unlock-direct':
+        return 'full'
+      case 'prereq':
+      case 'unlock':
+        return transitive
+      case 'program':
+        if (!hasFocus) return 'full'
+    }
     return input.hideUnrelated ? 'hidden' : 'mini'
   })
-  const edgeCtx: Context = { ...ctx, cls }
-  const edgeRole = topology.edges.map(edge => edgeRoleOf(edge, edgeCtx))
+  const edgeRole = topology.edges.map(edge => edgeRoleOf(edge, cls, ctx))
 
   return { cls, role, record, eligibility, inProgram, edgeRole, dimming }
 }
 
-function roleOf(v: number, ctx: Omit<Context, 'cls'>): NodeRole {
+function roleOf(v: number, ctx: Context): NodeRole {
   if (v === ctx.focus) return 'focus'
   if (ctx.ancestors.has(v)) return ctx.directPreds.has(v) ? 'prereq-direct' : 'prereq'
   if (ctx.descendants.has(v)) return ctx.directSuccs.has(v) ? 'unlock-direct' : 'unlock'
@@ -90,8 +116,9 @@ function filteredOut(level: number, subject: string, record: string | null, inpu
   return input.hideCompleted && record === 'completed'
 }
 
-function edgeRoleOf({ from, to }: LayoutEdge, ctx: Context): EdgeRole {
-  if (ctx.cls[from] === 'hidden' || ctx.cls[to] === 'hidden') return 'hidden'
+/** Chain edges while a course is selected, program edges in program mode, faint otherwise. */
+function edgeRoleOf({ from, to }: LayoutEdge, cls: readonly DisplayClass[], ctx: Context): EdgeRole {
+  if (cls[from] === 'hidden' || cls[to] === 'hidden') return 'hidden'
   const all = ctx.input.depth === 'all'
   if (ctx.focus >= 0) {
     const upstream = (v: number) => v === ctx.focus || ctx.ancestors.has(v)
@@ -103,8 +130,9 @@ function edgeRoleOf({ from, to }: LayoutEdge, ctx: Context): EdgeRole {
       if (from === ctx.focus) return 'unlock-direct'
       if (all) return 'unlock'
     }
-  } else if (ctx.inProgram[from] && ctx.inProgram[to]) {
+  } else if (ctx.program && ctx.inProgram[from] && ctx.inProgram[to]) {
     return 'program'
   }
+  // No unrelated curve is drawn while something is focused, unless "Show all connections".
   return !ctx.dimming || ctx.input.showAllEdges ? 'faint' : 'hidden'
 }

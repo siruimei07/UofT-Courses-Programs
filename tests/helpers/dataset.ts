@@ -199,6 +199,8 @@ export function presentationInput(overrides: Partial<PresentationInput> = {}): P
     programIds: null,
     record: new Map(),
     eligibility: null,
+    chainTitles: 'all',
+    titles: false,
     ...overrides,
   }
 }

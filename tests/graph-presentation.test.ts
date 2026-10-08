@@ -16,15 +16,17 @@ const edgeRoleOf = (topo: Topology, p: Presentation, from: string, to: string) =
   if (index < 0) throw new Error(`Missing edge ${from} → ${to}`)
   return p.edgeRole[index]
 }
+const CHAIN_EDGES = new Set(['prereq-direct', 'prereq', 'unlock-direct', 'unlock'])
 
 describe('presentation on the real UTM dataset', () => {
-  it('shows every node compact with faint edges when nothing is focused', () => {
+  it('shows every node compact (full with Titles) with faint edges when nothing is focused', () => {
     const p = computePresentation(topology, presentationInput())
     expect(p.dimming).toBe(false)
     expect(new Set(p.cls)).toEqual(new Set(['compact']))
     expect(new Set(p.role)).toEqual(new Set(['none']))
     expect(new Set(p.edgeRole)).toEqual(new Set(['faint']))
     expect(p.edgeRole).toHaveLength(topology.edges.length)
+    expect(new Set(computePresentation(topology, presentationInput({ titles: true })).cls)).toEqual(new Set(['full']))
   })
 
   it('colours the CSC148H5 chain: CSC108H5 waits before it, CSC207H5 and 300-level CSC follow', () => {
@@ -37,11 +39,22 @@ describe('presentation on the real UTM dataset', () => {
     expect(indirect.length).toBeGreaterThan(0)
     expect(edgeRoleOf(topology, p, 'CSC108H5', 'CSC148H5')).toBe('prereq-direct')
     expect(edgeRoleOf(topology, p, 'CSC148H5', 'CSC207H5')).toBe('unlock-direct')
-    for (const n of topology.nodes) {
-      expect(p.cls[n.index]).toBe(p.role[n.index] === 'none' ? 'mini' : 'full')
-    }
+    for (const n of topology.nodes) expect(p.cls[n.index]).toBe(p.role[n.index] === 'none' ? 'mini' : 'full')
     expect(p.edgeRole).toContain('hidden')
     expect(p.edgeRole).toContain('unlock')
+    expect(p.edgeRole).not.toContain('faint')
+  })
+
+  it('drops transitive titles when chain titles resolve to "direct" (the Titles toggle forces "all")', () => {
+    const p = computePresentation(topology, presentationInput({ focusId: 'UTM:CSC148H5', chainTitles: 'direct' }))
+    for (const n of topology.nodes) {
+      const role = p.role[n.index]
+      const expected = role === 'none' ? 'mini' : role === 'prereq' || role === 'unlock' ? 'compact' : 'full'
+      expect(p.cls[n.index], n.code).toBe(expected)
+    }
+    expect(p.cls).toContain('compact')
+    const forced = computePresentation(topology, presentationInput({ focusId: 'UTM:CSC148H5', chainTitles: 'direct', titles: true }))
+    expect(forced.cls).not.toContain('compact')
   })
 
   it('matches collectAncestors / collectDescendants', () => {
@@ -53,6 +66,21 @@ describe('presentation on the real UTM dataset', () => {
     expect([...ancestors].every(v => p.role[v] === 'prereq' || p.role[v] === 'prereq-direct')).toBe(true)
     expect([...descendants].every(v => p.role[v] === 'unlock' || p.role[v] === 'unlock-direct')).toBe(true)
     expect(p.role.filter(role => role !== 'none' && role !== 'focus')).toHaveLength(ancestors.size + descendants.size)
+  })
+
+  it('never draws an unrelated edge while dimming unless Show all connections is on', () => {
+    const p = computePresentation(topology, presentationInput({ focusId: 'UTM:MAT232H5' }))
+    topology.edges.forEach((edge, e) => {
+      if (CHAIN_EDGES.has(p.edgeRole[e])) {
+        expect(p.role[edge.from]).not.toBe('none')
+        expect(p.role[edge.to]).not.toBe('none')
+      } else {
+        expect(p.edgeRole[e]).toBe('hidden')
+      }
+    })
+    const all = computePresentation(topology, presentationInput({ focusId: 'UTM:MAT232H5', showAllEdges: true }))
+    expect(all.edgeRole).toContain('faint')
+    expect(all.edgeRole.filter(role => CHAIN_EDGES.has(role))).toHaveLength(p.edgeRole.filter(role => CHAIN_EDGES.has(role)).length)
   })
 })
 
@@ -69,6 +97,7 @@ const synthetic = buildTopology(syntheticDataset([
   { code: 'CCC010H5', level: 0 },
 ]))
 const run = (overrides: Parameters<typeof presentationInput>[0]) => computePresentation(synthetic, presentationInput(overrides))
+const classes = (p: Presentation) => Object.fromEntries(synthetic.nodes.map(n => [n.code, p.cls[n.index]]))
 
 describe('presentation rules on a synthetic graph', () => {
   it('assigns direct and transitive roles with depth "all"', () => {
@@ -82,6 +111,14 @@ describe('presentation rules on a synthetic graph', () => {
     // AAA102 → AAA301 jumps from an ancestor to a descendant: not part of either chain.
     expect(edgeRoleOf(synthetic, p, 'AAA102H5', 'AAA301H5')).toBe('hidden')
     expect(edgeRoleOf(synthetic, p, 'BBB101H5', 'BBB201H5')).toBe('hidden')
+  })
+
+  it('gives the focus and direct neighbours full labels and transitive ones full or compact per chain titles', () => {
+    const all = classes(run({ focusId: 'UTM:AAA301H5' }))
+    expect(all).toMatchObject({ AAA301H5: 'full', AAA201H5: 'full', AAA102H5: 'full', AAA401H5: 'full', AAA101H5: 'full', BBB101H5: 'mini' })
+    const direct = classes(run({ focusId: 'UTM:AAA301H5', chainTitles: 'direct' }))
+    expect(direct).toMatchObject({ AAA301H5: 'full', AAA201H5: 'full', AAA102H5: 'full', AAA401H5: 'full', AAA101H5: 'compact', BBB101H5: 'mini' })
+    expect(classes(run({ focusId: 'UTM:AAA301H5', chainTitles: 'direct', titles: true })).AAA101H5).toBe('full')
   })
 
   it('marks transitive prerequisites as "prereq" and colours their edges', () => {
@@ -115,12 +152,16 @@ describe('presentation rules on a synthetic graph', () => {
     expect(run({ focusId: 'UTM:AAA201H5', hideUnrelated: true, showAllEdges: true }).edgeRole).toContain('hidden')
   })
 
-  it('applies level, subject and completed filters but never hides the focus', () => {
+  it('applies level, subject and completed filters by each course\'s own level, but never hides the focus', () => {
     const levels = run({ levels: new Set([100]) })
     expect(clsOf(synthetic, levels, 'CCC010H5')).toBe('compact')
     expect(clsOf(synthetic, levels, 'AAA201H5')).toBe('hidden')
     expect(edgeRoleOf(synthetic, levels, 'AAA101H5', 'AAA201H5')).toBe('hidden')
     expect(edgeRoleOf(synthetic, levels, 'BBB101H5', 'BBB201H5')).toBe('hidden')
+    const focusedLevels = run({ levels: new Set([100]), focusId: 'UTM:AAA301H5' })
+    expect(clsOf(synthetic, focusedLevels, 'AAA301H5')).toBe('full')
+    expect(clsOf(synthetic, focusedLevels, 'AAA201H5')).toBe('hidden')
+    expect(clsOf(synthetic, focusedLevels, 'AAA102H5')).toBe('full')
 
     const subjects = run({ subjects: new Set(['BBB']), focusId: 'UTM:AAA201H5' })
     expect(clsOf(synthetic, subjects, 'AAA201H5')).toBe('full')
@@ -145,12 +186,29 @@ describe('presentation rules on a synthetic graph', () => {
     expect(p.inProgram[at(synthetic, 'AAA401H5')]).toBe(true)
     expect(edgeRoleOf(synthetic, p, 'BBB101H5', 'BBB201H5')).toBe('program')
     expect(edgeRoleOf(synthetic, p, 'AAA301H5', 'AAA401H5')).toBe('hidden')
+    expect(classes(run({ programIds, hideUnrelated: true }))).toMatchObject({ AAA101H5: 'hidden', BBB101H5: 'full' })
+  })
 
-    const focused = run({ programIds, focusId: 'UTM:AAA301H5' })
+  it('lets chain classes win when a course is focused inside a program; other program courses become minis', () => {
+    const programIds = new Set(['UTM:BBB101H5', 'UTM:BBB201H5', 'UTM:AAA401H5', 'UTM:AAA101H5'])
+    const focused = run({ programIds, focusId: 'UTM:AAA301H5', chainTitles: 'direct' })
     expect(roleOf(synthetic, focused, 'AAA401H5')).toBe('unlock-direct')
     expect(roleOf(synthetic, focused, 'BBB101H5')).toBe('program')
+    expect(classes(focused)).toMatchObject({ AAA401H5: 'full', AAA101H5: 'compact', BBB101H5: 'mini', BBB201H5: 'mini', CCC010H5: 'mini' })
+    expect(focused.inProgram[at(synthetic, 'BBB101H5')]).toBe(true)
+    expect(focused.inProgram[at(synthetic, 'AAA101H5')]).toBe(true)
     expect(edgeRoleOf(synthetic, focused, 'BBB101H5', 'BBB201H5')).toBe('hidden')
     expect(edgeRoleOf(synthetic, run({ programIds, focusId: 'UTM:AAA301H5', showAllEdges: true }), 'BBB101H5', 'BBB201H5')).toBe('faint')
+    const hidden = run({ programIds, focusId: 'UTM:AAA301H5', hideUnrelated: true })
+    expect(classes(hidden)).toMatchObject({ BBB101H5: 'hidden', BBB201H5: 'hidden', AAA401H5: 'full' })
+  })
+
+  it('treats an empty program set like no program', () => {
+    const p = run({ programIds: new Set() })
+    expect(p.dimming).toBe(false)
+    expect(new Set(p.cls)).toEqual(new Set(['compact']))
+    expect(new Set(p.edgeRole)).toEqual(new Set(['faint']))
+    expect(p.inProgram.every(value => !value)).toBe(true)
   })
 
   it('copies record and eligibility, skipping eligibility for completed or in-progress courses', () => {

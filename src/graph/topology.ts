@@ -1,27 +1,36 @@
 // Static layout skeleton, computed once per dataset: layout edges, bands, columns, lanes, cell order.
 import type { GraphCourse, GraphDataset } from '../data/schema'
-import type { Band, EdgeKind, Lane, LayoutEdge, TopoNode, Topology } from './types'
+import type { Band, EdgeKind, ExcludedEdge, Lane, LayoutEdge, TopoNode, Topology } from './types'
 
 /** 100/200/300/400 bands always exist so headers stay stable even when a level is empty. */
 const MIN_BANDS = 4
+
+/** Barycentre keys are compared after rounding so float noise never decides an order. */
+const KEY_SCALE = 1e6
 
 /** 000/100 → 0, 200 → 1, 300 → 2, 400 → 3 (any higher level keeps counting up). */
 export function bandOfLevel(level: number): number {
   return Math.max(0, Math.floor(level / 100) - 1)
 }
 
+/**
+ * Builds the static layout. The result depends only on the set of courses, not on their order in
+ * `dataset.courses` (node indices follow the input order; every derived field is order-free).
+ */
 export function buildTopology(dataset: GraphDataset): Topology {
   const courses = dataset.courses
   const n = courses.length
   const indexById = new Map<string, number>()
   courses.forEach((course, index) => indexById.set(course.id, index))
 
-  const { edges, brokenEdges } = breakCycles(courses, collectEdges(courses, indexById))
+  // Every course sits in the band of its own level.
+  const band = courses.map(course => bandOfLevel(course.level))
+  const { forward, backward } = splitBackward(collectEdges(courses, indexById), band)
+  const { edges, broken } = breakCycles(courses, forward)
+  const excludedEdges = [...backward, ...broken].sort(compareEdges)
   const { preds, succs } = buildAdjacency(n, edges)
   const topoOrder = topologicalOrder(preds, succs)
 
-  const ownBand = courses.map(course => bandOfLevel(course.level))
-  const band = effectiveBands(topoOrder, ownBand, preds)
   const depth = localDepths(topoOrder, band, preds)
   const bands = buildBands(band, depth)
   const col = band.map((b, v) => bands[b].startCol + depth[v])
@@ -33,7 +42,7 @@ export function buildTopology(dataset: GraphDataset): Topology {
 
   const cells: number[][][] = lanes.map(() => Array.from({ length: columnCount }, () => []))
   for (let v = 0; v < n; v++) cells[laneOf[v]][col[v]].push(v)
-  const order = orderCells(cells, preds, succs, courses.map(course => course.code))
+  const order = orderCells(cells, preds, succs, courses)
   for (const lane of lanes) for (const cell of cells[lane.index]) lane.nodes.push(...cell)
 
   const nodes: TopoNode[] = courses.map((course, index) => ({
@@ -47,13 +56,13 @@ export function buildTopology(dataset: GraphDataset): Topology {
     band: band[index],
     col: col[index],
     order: order[index],
-    displaced: band[index] > ownBand[index],
   }))
 
-  return { nodes, indexById, edges, brokenEdges, preds, succs, lanes, bands, columnCount, cells }
+  return { nodes, indexById, edges, excludedEdges, preds, succs, lanes, bands, columnCount, cells }
 }
 
 const compareText = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0)
+const compareEdges = (a: LayoutEdge, b: LayoutEdge) => a.from - b.from || a.to - b.to
 
 /** Prerequisite then corequisite references between loaded courses; one edge per pair, no self-loops. */
 function collectEdges(courses: readonly GraphCourse[], indexById: ReadonlyMap<string, number>): LayoutEdge[] {
@@ -70,7 +79,18 @@ function collectEdges(courses: readonly GraphCourse[], indexById: ReadonlyMap<st
   }
   courses.forEach((course, to) => add(course.prereq?.ids, to, 'prereq'))
   courses.forEach((course, to) => add(course.coreq?.ids, to, 'coreq'))
-  return edges.sort((a, b) => a.from - b.from || a.to - b.to)
+  return edges.sort(compareEdges)
+}
+
+/** A reference from a higher band to a lower one ("… or 77% in FSL406H5") never shapes the layout. */
+function splitBackward(candidates: readonly LayoutEdge[], band: readonly number[]) {
+  const forward: LayoutEdge[] = []
+  const backward: ExcludedEdge[] = []
+  for (const edge of candidates) {
+    if (band[edge.from] > band[edge.to]) backward.push({ ...edge, reason: 'backward' })
+    else forward.push(edge)
+  }
+  return { forward, backward }
 }
 
 function buildAdjacency(n: number, edges: readonly LayoutEdge[]) {
@@ -86,17 +106,20 @@ function buildAdjacency(n: number, edges: readonly LayoutEdge[]) {
 const compareRank = (a: GraphCourse, b: GraphCourse) =>
   a.level - b.level || compareText(a.code, b.code) || compareText(a.id, b.id)
 
-/** Inside each strongly connected component keep only edges that follow (level, code) order. */
-function breakCycles(courses: readonly GraphCourse[], candidates: LayoutEdge[]) {
+/**
+ * Inside each strongly connected component keep only edges that follow (level, code) order; the
+ * rest are cycle breakers (e.g. LIN105H5 → LIN104H5). Components and ranks are order-free.
+ */
+function breakCycles(courses: readonly GraphCourse[], candidates: readonly LayoutEdge[]) {
   const component = stronglyConnected(buildAdjacency(courses.length, candidates).succs)
   const edges: LayoutEdge[] = []
-  const brokenEdges: LayoutEdge[] = []
+  const broken: ExcludedEdge[] = []
   for (const edge of candidates) {
     const sameComponent = component[edge.from] === component[edge.to]
     if (!sameComponent || compareRank(courses[edge.from], courses[edge.to]) < 0) edges.push(edge)
-    else brokenEdges.push(edge)
+    else broken.push({ ...edge, reason: 'cycle' })
   }
-  return { edges, brokenEdges }
+  return { edges, broken }
 }
 
 /** Iterative Tarjan; returns a component id per node. */
@@ -159,14 +182,7 @@ function topologicalOrder(preds: readonly number[][], succs: readonly number[][]
   return order
 }
 
-/** A course moves into the latest band among its prerequisites. */
-function effectiveBands(topoOrder: readonly number[], ownBand: readonly number[], preds: readonly number[][]): number[] {
-  const band = ownBand.slice()
-  for (const v of topoOrder) for (const p of preds[v]) if (band[p] > band[v]) band[v] = band[p]
-  return band
-}
-
-/** Longest chain of predecessors inside the same effective band. */
+/** Longest chain of predecessors inside the same band (layout edges never point to a lower band). */
 function localDepths(topoOrder: readonly number[], band: readonly number[], preds: readonly number[][]): number[] {
   const depth = new Array<number>(band.length).fill(0)
   for (const v of topoOrder) {
@@ -208,27 +224,44 @@ function buildLanes(dataset: GraphDataset): Lane[] {
 
 /**
  * Sorts every cell in place and returns each node's position in its cell.
- * Sweep 1 orders by the barycentre of predecessor positions, column by column left → right.
- * Roots that have successors then take the barycentre of those successors, and sweep 2 repeats
- * the left → right pass with those keys. Keyless nodes go last; ties fall back to code.
+ *
+ * Pass 1 walks the columns left → right and orders each cell by the barycentre of its nodes'
+ * predecessor positions (a position is lane index + relative slot inside the cell, so it compares
+ * across lanes). Roots have no predecessors, so after pass 1 every root that has successors takes
+ * the barycentre of those successors' pass-1 positions, and pass 2 repeats the left → right walk
+ * with these keys. This pulls a root such as BBB103H5 towards the row its dependents ended up on.
+ * Keyless nodes (isolated courses) go last.
+ *
+ * Keys are rounded to 1e-6 and summed in sorted order, and ties fall back to code then id, so the
+ * order never depends on float noise or on the order of the input courses.
  */
-function orderCells(cells: number[][][], preds: readonly number[][], succs: readonly number[][], codes: readonly string[]): number[] {
-  const n = codes.length
+function orderCells(
+  cells: number[][][],
+  preds: readonly number[][],
+  succs: readonly number[][],
+  courses: readonly GraphCourse[],
+): number[] {
+  const n = courses.length
   const order = new Array<number>(n).fill(0)
   const position = new Float64Array(n)
   const key = new Float64Array(n)
   const columnCount = cells[0]?.length ?? 0
+  const scratch: number[] = []
   const barycentre = (list: readonly number[]) => {
+    if (!list.length) return NaN
+    scratch.length = 0
+    for (const v of list) scratch.push(position[v])
+    scratch.sort((a, b) => a - b)
     let sum = 0
-    for (const v of list) sum += position[v]
-    return list.length ? sum / list.length : NaN
+    for (const value of scratch) sum += value
+    return Math.round((sum / list.length) * KEY_SCALE)
   }
   const compare = (a: number, b: number) => {
     const missingA = Number.isNaN(key[a])
     const missingB = Number.isNaN(key[b])
     if (missingA !== missingB) return missingA ? 1 : -1
     if (!missingA && key[a] !== key[b]) return key[a] - key[b]
-    return compareText(codes[a], codes[b]) || a - b
+    return compareText(courses[a].code, courses[b].code) || compareText(courses[a].id, courses[b].id)
   }
   const sweep = (keyOf: (v: number) => number) => {
     for (let col = 0; col < columnCount; col++) {
@@ -239,7 +272,6 @@ function orderCells(cells: number[][][], preds: readonly number[][], succs: read
         cell.sort(compare)
         cell.forEach((v, k) => {
           order[v] = k
-          // Vertical estimate: lane index plus the relative slot inside the cell.
           position[v] = lane + (k + 0.5) / cell.length
         })
       })
