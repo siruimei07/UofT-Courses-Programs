@@ -849,3 +849,61 @@ Keep `schemaVersion: 1` if every change is additive and optional. Bump it to 2 i
 - https://utsc.calendar.utoronto.ca/ , `/search-courses`, `/search-programs`, `/robots.txt`
 - https://md.calendar.utoronto.ca/ , https://pharmacy.calendar.utoronto.ca/ , https://sgs.calendar.utoronto.ca/ (homepages only)
 - Local: `data/utm/catalog.json`, `data/external-references.json`, `.cache/calendar/*` (UTM HTML), `pipeline/*.py`, `scripts/build-frontend-data.ts`, `src/data/schema.ts`, `src/graph/topology.ts`
+
+---
+
+## 12. Implemented adapter (pipeline, 2026-10-08)
+
+The first step of section 10.1 is in place: the pipeline is campus-aware and UTM output is
+unchanged by the refactor itself (the offline re-parse was byte-identical before the parser fixes
+of the same change landed). UTSG exists as a **planned stub**; nothing was collected for it.
+
+**Code layout.** `pipeline/` is a package, run as `python -I pipeline [--campus utm] ...`
+(`npm run data:collect`). Campus specifics live in `pipeline/campuses/`:
+
+| File | Contents |
+| --- | --- |
+| `base.py` | `Campus`, a frozen dataclass holding every campus constant; `CAMPUS_DIGITS` (`5` UTM, `1` and `0` UTSG, `3` UTSC) |
+| `utm.py` | `UTM`, status `available`: the values the collector and parser used before, verbatim |
+| `utsg.py` | `UTSG`, status `planned`: Arts & Science values from sections 3, 4 and 6 of this document |
+| `__init__.py` | `REGISTRY = {'utm': UTM, 'utsg': UTSG}` and `get_campus()` |
+
+`Campus` fields: `id`, `name`, `status`, `data_dir`, `campus_digit`, `base_url`,
+`course_search_path`, `program_search_path`, `course_page_template`, `program_page_template`,
+`cache_dir`, `supplementary_dir`, the directory selectors and course-header pattern, pager selector,
+page-title marker, `year_heading_re`, `supporting_slugs`, detail selectors (`title_selector`,
+`course_article_selector`, `program_article_selector`), `title_separators`, `post_code_re`,
+`course_fields` / `program_fields` (concept → Drupal field class, e.g. `description: field-desc`
+for UTM and `body` for Arts & Science), `route_cue_re` and `cohort_cue_re` for program prose,
+`seed_slugs` and `nav_rule_words_re` for supporting sources, and `data_root`. Derived values
+(`calendar_url`, `course_search_url`, `out_dir`, `course_url()`, `course_level()`,
+`course_credits()`, `academic_year()`) are methods, so a new campus overrides data, not code.
+`tests/test_campuses.py` checks ids, campus digits, `dataDir`, status and all five URLs against
+`data/campuses.json`.
+
+**Isolation.** Each campus has its own cache and generation state: UTM keeps `.cache/calendar/`
+(no migration), UTSG uses `.cache/calendar/utsg/` and `.cache/supplementary/utsg/`, so a UTSG
+`--refresh` can never invalidate the UTM generation. Outputs go to `data/<data_dir>/`. All network
+access goes through `pipeline/http.py` (one browser-like User-Agent, one global throttle of at
+least 0.5 s between request starts, raised by any `robots.txt` crawl delay).
+
+**Planned adapters are closed.** `collect()`, `build_catalog()` and the CLI raise
+`NotImplementedError` (the CLI exits with a usage error) for a `planned` campus unless
+`--allow-planned` is given, and an experimental run still only writes candidates until `--accept`.
+
+**Covered from the checklist in section 10.1:** campus digit `0` in the course pattern and
+`course_id()`; the `:` title separator; the `2026-27` year heading; field-name aliases (`body`,
+`field-recommended`, `field-completion-requirements`); per-campus caches; `--campus`; the registry
+consistency test. Conditional sentences such as `Students seeking …` / `For students …` are
+split out of course prerequisites and their codes kept as mentions, which is the UTM half of the
+"cohort clause split" item.
+
+**Still open before UTSG can be collected:** the six-faculty `FacultySource` dimension (the stub
+covers the Arts & Science host only); program URLs built from the directory header code (Arts &
+Science rows have no `/program/` link, so program discovery fails today); soft-404 detection by
+final URL and missing `article.node--type-*`; the `Prerequisite for <cohort> students:` split into
+`applicability`; breadth as a list; official credit fields (Engineering, Music); the cross-listing
+merge; and `data/utsg/subjects.json`. The design differs from the sketch in section 10.1 only in
+form: one `Campus` record per campus instead of a `CampusAdapter` protocol, in a
+`pipeline/campuses/` package instead of `pipeline/campuses.py`. A `faculties` tuple can be added to
+`Campus` without touching UTM.

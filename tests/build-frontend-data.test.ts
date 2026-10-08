@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import {
   buildCampusDatasets, buildRegistry, compareCodeUnits, DataBuildError, generateFrontendData,
-  parseCampusRegistry, parseSubjectsFile, serialise, summarise,
+  parseCampusRegistry, parseSubjectsFile, requirementRefs, serialise, summarise, toRequirementLite,
   type CampusSource, type SubjectsInput,
 } from '../scripts/build-frontend-data'
 import type { GraphCourse, RequirementLite } from '../src/data/schema'
@@ -43,9 +43,12 @@ function requirements(course: GraphCourse): RequirementLite[] {
 const sorted = (values: readonly string[]) => [...values].sort(compareCodeUnits)
 
 // Synthetic fixtures for validation paths; the real catalog never triggers them.
-const req = (rule: Rule = { kind: 'true' }, rawText = '', courseIds: string[] = []): Requirement => ({
-  rawText, sourceUrl: 'https://utm.calendar.utoronto.ca/', rule, courseIds,
+const req = (rule: Rule = { kind: 'true' }, rawText = '', courseIds: string[] = [], extra: Partial<Requirement> = {}): Requirement => ({
+  rawText, sourceUrl: 'https://utm.calendar.utoronto.ca/', rule, courseIds, ...extra,
 })
+const catalogIds = new Set(catalog.courses.map(entry => entry.id))
+const isEmpty = (raw: Requirement) => raw.rawText.trim() === '' && raw.rule.kind === 'true'
+  && raw.courseIds.length + (raw.mentionedIds?.length ?? 0) + (raw.unresolvedIds?.length ?? 0) === 0
 const course = (code: string, options: Partial<Course> = {}): Course => ({
   id: `UTM:${code}`, campus: 'UTM', code, title: `Synthetic ${code}`, subject: code.slice(0, 3), level: Number(code[3]) * 100,
   credits: 0.5, description: '', sourceUrl: `https://utm.calendar.utoronto.ca/course/${code.toLowerCase()}`,
@@ -75,13 +78,14 @@ describe('graph dataset', () => {
     for (const entry of graph.courses) {
       const source = byId.get(entry.id)!
       for (const [field, key] of REQUIREMENTS) {
-        const raw = source[field]
-        const empty = raw.rawText.trim() === '' && raw.rule.kind === 'true' && raw.courseIds.length === 0
-        expect(entry[key] === undefined, `${entry.id}.${key}`).toBe(empty)
+        expect(entry[key] === undefined, `${entry.id}.${key}`).toBe(isEmpty(source[field]))
       }
       for (const lite of requirements(entry)) {
-        expect(lite.text !== '' || lite.rule.kind !== 'true' || lite.ids.length > 0, entry.id).toBe(true)
-        expect(lite.ids).toEqual(sorted([...new Set(lite.ids)]))
+        const refs = lite.ids.length + (lite.mentioned?.length ?? 0) + (lite.unresolved?.length ?? 0)
+        expect(lite.text !== '' || lite.rule.kind !== 'true' || refs > 0, entry.id).toBe(true)
+        for (const list of [lite.ids, lite.mentioned ?? [], lite.unresolved ?? []]) expect(list).toEqual(sorted([...new Set(list)]))
+        expect(lite.mentioned).not.toEqual([])
+        expect(lite.unresolved).not.toEqual([])
       }
       expect(entry.notes).not.toBe('')
       expect(entry.distribution).not.toBe('')
@@ -92,6 +96,38 @@ describe('graph dataset', () => {
     const coreq = graphCourse('CHM110H5').coreq
     expect(coreq?.text).toMatch(/^Recommended Corequisite/)
     expect(coreq?.rule).toEqual({ kind: 'true' })
+    expect(coreq?.ids).toEqual([])
+    expect(coreq?.mentioned).toContain('UTM:MAT135H5')
+  })
+
+  it('never draws an edge to a same-campus course that is not in the catalog', () => {
+    for (const entry of graph.courses) {
+      for (const lite of requirements(entry)) {
+        for (const id of lite.ids) if (id.startsWith('UTM:')) expect(catalogIds.has(id), `${entry.id} -> ${id}`).toBe(true)
+        for (const id of lite.unresolved ?? []) expect(catalogIds.has(id), `${entry.id} unresolved ${id}`).toBe(false)
+        const edges = new Set(lite.ids)
+        for (const id of lite.mentioned ?? []) expect(edges.has(id), `${entry.id} mentioned ${id}`).toBe(false)
+      }
+    }
+    expect(graphCourse('HIN412Y5').prereq).toMatchObject({ ids: [], unresolved: ['UTM:HIN312Y5'] })
+  })
+
+  it('carries the parser roles: recovered edges, mentions and no self references', () => {
+    expect(graphCourse('CSC236H5').prereq?.ids).toContain('UTM:CSC148H5')
+    expect(graphCourse('ENG201Y5').prereq).toMatchObject({ ids: [], mentioned: ['UTM:ENG100H5'] })
+    expect(graphCourse('LIN104H5').prereq).toMatchObject({ rule: { kind: 'true' }, ids: [], mentioned: ['UTM:LIN105H5'] })
+    expect(graphCourse('PHL299Y5').coreq?.ids).toContain('UTM:PHL105Y5')
+    for (const entry of graph.courses) {
+      expect(entry.prereq?.ids ?? [], entry.id).not.toContain(entry.id)
+      expect(entry.coreq?.ids ?? [], entry.id).not.toContain(entry.id)
+    }
+  })
+
+  it('passes the delivery campus through', () => {
+    expect(graphCourse('DRS121H5').deliveryCampus).toBe('Sheridan')
+    expect(graph.courses.filter(entry => entry.deliveryCampus !== undefined)).toHaveLength(
+      catalog.courses.filter(entry => entry.deliveryCampus).length)
+    expect(graphCourse('CSC148H5')).not.toHaveProperty('deliveryCampus')
   })
 
   it('normalises requirement text', () => {
@@ -188,6 +224,21 @@ describe('programs dataset', () => {
     expect(major?.groups.map(group => group.id)).toEqual(source?.groups.map(group => group.id))
   })
 
+  it('keeps excluded and retired codes out of program group ids', () => {
+    const groups = new Map(catalog.programs.flatMap(program => program.groups).map(group => [group.id, group]))
+    for (const program of programs.programs) {
+      for (const group of program.groups) {
+        const source = groups.get(group.id)!
+        for (const id of source.mentionedIds ?? []) expect(group.ids, group.id).not.toContain(id)
+        for (const id of source.unresolvedIds ?? []) expect(group.ids, group.id).not.toContain(id)
+      }
+    }
+    const minor = programs.programs.find(program => program.code === 'ERMIN1688')
+    const excepted = minor?.groups.find(group => group.text.includes('except for CSC392H5'))
+    expect(excepted?.ids).toContain('UTM:GGR335H5')
+    expect(excepted?.ids).not.toContain('UTM:CSC392H5')
+  })
+
   it('omits empty program notes', () => {
     for (const program of programs.programs) expect(program.notes).not.toBe('')
   })
@@ -209,6 +260,15 @@ describe('campus registry', () => {
     expect(registry.generatedAt).toBe(catalog.metadata.fetchedAt)
   })
 
+  it('carries startSubjects from data/campuses.json and drops subjects the dataset lacks', () => {
+    for (const entry of registry.campuses) expect(entry.startSubjects).toEqual(campus(entry.id).startSubjects)
+    const withMissing = { ...registrySource, campuses: registrySource.campuses.map(entry => (
+      entry.id === 'UTM' ? { ...entry, startSubjects: ['CSC', 'ZZZ'] } : entry)) }
+    const rebuilt = buildRegistry(withMissing, new Map([['UTM', summarise(built)]]))
+    expect(rebuilt.campuses.find(entry => entry.id === 'UTM')?.startSubjects).toEqual(['CSC'])
+    expect(() => parseCampusRegistry({ schemaVersion: 1, campuses: [{ ...utm, startSubjects: ['csc'] }] })).toThrow(/startSubjects/)
+  })
+
   it('refuses an available campus without a dataset', () => {
     expect(() => buildRegistry(registrySource, new Map())).toThrow(DataBuildError)
   })
@@ -222,6 +282,35 @@ describe('input validation', () => {
 
   it('fails on malformed requirement ids', () => {
     const bad = course('TST200H5', { prerequisites: req({ kind: 'course', courseId: 'UTM:tst100' }, 'TST100', ['UTM:tst100']) })
+    expect(() => buildCampusDatasets(synthetic([bad]), null, utm)).toThrow(/malformed course id/)
+  })
+
+  it('moves same-campus references missing from the catalog out of the edges', () => {
+    const scope = { campus: 'UTM' as const, courseIds: new Set(['UTM:TST100H5']) }
+    const legacy = req({ kind: 'any', items: [{ kind: 'course', courseId: 'UTM:TST100H5' }, { kind: 'course', courseId: 'UTM:OLD100H5' }] },
+      'TST100H5 or OLD100H5', ['UTM:TST100H5', 'UTM:OLD100H5', 'UTSG:TST100H1'])
+    expect(requirementRefs(legacy, scope)).toEqual({ ids: ['UTM:TST100H5', 'UTSG:TST100H1'], mentioned: [], unresolved: ['UTM:OLD100H5'] })
+    const roles = req({ kind: 'course', courseId: 'UTM:OLD100H5' }, 'OLD100H5 (except TST100H5)', [],
+      { mentionedIds: ['UTM:TST100H5'], unresolvedIds: ['UTM:OLD100H5'] })
+    expect(toRequirementLite(roles, scope)).toEqual({
+      text: 'OLD100H5 (except TST100H5)', rule: { kind: 'course', courseId: 'UTM:OLD100H5' }, ids: [],
+      mentioned: ['UTM:TST100H5'], unresolved: ['UTM:OLD100H5'],
+    })
+    const mentionOnly = req({ kind: 'true' }, '', [], { mentionedIds: ['UTM:TST100H5'] })
+    expect(toRequirementLite(mentionOnly, scope)).toMatchObject({ text: '', ids: [], mentioned: ['UTM:TST100H5'] })
+  })
+
+  it('projects a synthetic catalog with roles and a delivery campus', () => {
+    const delivered = course('TST200H5', {
+      deliveryCampus: 'Sheridan',
+      prerequisites: req({ kind: 'course', courseId: 'UTM:TST100H5' }, 'TST100H5 (excluding TST150H5)', ['UTM:TST100H5'],
+        { mentionedIds: ['UTM:TST150H5'] }),
+    })
+    const result = buildCampusDatasets(synthetic([course('TST100H5'), delivered]), null, utm)
+    const projected = result.graph.courses.find(entry => entry.code === 'TST200H5')
+    expect(projected?.deliveryCampus).toBe('Sheridan')
+    expect(projected?.prereq).toMatchObject({ ids: ['UTM:TST100H5'], mentioned: ['UTM:TST150H5'] })
+    const bad = course('TST300H5', { prerequisites: req(undefined, 'x', [], { mentionedIds: ['nope'] }) })
     expect(() => buildCampusDatasets(synthetic([bad]), null, utm)).toThrow(/malformed course id/)
   })
 

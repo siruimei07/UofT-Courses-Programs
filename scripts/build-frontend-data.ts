@@ -15,7 +15,7 @@ import type {
   CampusEntry, CampusId, CampusRegistry, CampusStatus, DetailsDataset, Division, GraphCourse,
   GraphDataset, ProgramGroupLite, ProgramLite, ProgramsDataset, RequirementLite, SubjectInfo,
 } from '../src/data/schema'
-import { ruleCourseIds } from '../src/domain/planner'
+import { ruleCourseIds } from '../src/domain/rules'
 import type { Catalog, Course, Program, ProgramGroup, Requirement, Rule } from '../src/domain/types'
 
 /** One entry of data/campuses.json (the backend registry). */
@@ -32,6 +32,14 @@ export interface CampusSource {
   coursePageTemplate: string
   programPageTemplate: string
   campusDigit?: string
+  /** Subject codes shown first on a first visit. */
+  startSubjects?: string[]
+}
+
+/** What a requirement's ids are resolved against: same-campus ids must be catalog courses. */
+export interface IdScope {
+  campus: CampusId
+  courseIds: ReadonlySet<string>
 }
 
 export interface CampusSourceRegistry {
@@ -64,6 +72,8 @@ export interface CampusSummary {
   fetchedAt: string
   courseCount: number
   programCount: number
+  /** Subject codes present in the dataset. */
+  subjects: string[]
 }
 
 export interface GeneratedFile {
@@ -164,6 +174,10 @@ export function parseCampusRegistry(raw: unknown): CampusSourceRegistry {
     if (typeof entry.dataDir !== 'string' || !/^[a-z0-9-]+$/.test(entry.dataDir)) errors.push(`${where}: invalid dataDir ${JSON.stringify(entry.dataDir)}`)
     for (const key of ['name', 'shortName', 'calendarUrl', 'courseSearchUrl', 'programSearchUrl', 'coursePageTemplate', 'programPageTemplate']) {
       if (!isText(entry[key])) errors.push(`${where}: missing ${key}`)
+    }
+    const start = entry.startSubjects
+    if (start !== undefined && (!Array.isArray(start) || !start.every(code => typeof code === 'string' && /^[A-Z]{2,4}$/.test(code)))) {
+      errors.push(`${where}: startSubjects must be an array of subject codes`)
     }
   })
   if (errors.length) throw new DataBuildError('data/campuses.json', errors)
@@ -287,21 +301,33 @@ function ruleIssues(rule: Rule | undefined, where: string, errors: string[]): vo
   }
 }
 
+const OPTIONAL_ID_LISTS = ['mentionedIds', 'unresolvedIds'] as const
+
 function requirementIssues(req: Requirement | undefined, where: string, errors: string[], warnings: string[]): void {
   if (!isRecord(req) || typeof req.rawText !== 'string' || !Array.isArray(req.courseIds)) {
     errors.push(`${where}: malformed requirement`)
     return
   }
-  for (const id of req.courseIds) {
+  const lists: unknown[][] = [req.courseIds]
+  for (const key of OPTIONAL_ID_LISTS) {
+    const value: unknown = req[key]
+    if (value === undefined) continue
+    if (Array.isArray(value)) lists.push(value)
+    else errors.push(`${where}: ${key} is not an array`)
+  }
+  for (const id of lists.flat()) {
     if (typeof id !== 'string' || !COURSE_REF.test(id)) errors.push(`${where}: malformed course id ${JSON.stringify(id)}`)
   }
   const before = errors.length
   ruleIssues(req.rule, where, errors)
   if (errors.length > before) return
   if (new Set(req.courseIds).size !== req.courseIds.length) warnings.push(`${where}: duplicate course ids (de-duplicated)`)
-  const listed = new Set(req.courseIds)
+  const listed = new Set([...req.courseIds, ...(req.unresolvedIds ?? [])])
   const unlisted = ruleCourseIds(req.rule).filter(id => !listed.has(id))
   if (unlisted.length) warnings.push(`${where}: rule references ids missing from courseIds (merged): ${unlisted.join(', ')}`)
+  const mentioned = new Set(req.mentionedIds ?? [])
+  const both = [...listed].filter(id => mentioned.has(id))
+  if (both.length) warnings.push(`${where}: ids listed both as references and as mentions (kept as references): ${both.join(', ')}`)
 }
 
 function courseIssues(course: Course, campus: CampusId, errors: string[], warnings: string[]): void {
@@ -317,7 +343,9 @@ function courseIssues(course: Course, campus: CampusId, errors: string[], warnin
   for (const key of ['description', 'notes'] as const) {
     if (typeof course[key] !== 'string') errors.push(`${where}: ${key} is not a string`)
   }
-  if (course.distribution !== undefined && typeof course.distribution !== 'string') errors.push(`${where}: distribution is not a string`)
+  for (const key of ['distribution', 'deliveryCampus'] as const) {
+    if (course[key] !== undefined && typeof course[key] !== 'string') errors.push(`${where}: ${key} is not a string`)
+  }
   for (const [field] of REQUIREMENT_FIELDS) requirementIssues(course[field], `${where}.${field}`, errors, warnings)
 }
 
@@ -413,19 +441,40 @@ export function canonicalRule(rule: Rule): Rule {
   }
 }
 
-function requirementIds(req: Requirement): string[] {
-  return uniqueSorted([...req.courseIds, ...ruleCourseIds(req.rule)])
+interface RequirementRefs {
+  /** Graph edges: catalog courses of this campus and every other-campus id. */
+  ids: string[]
+  mentioned: string[]
+  /** Same-campus ids absent from the catalog (retired or misprinted). */
+  unresolved: string[]
 }
 
-/** `undefined` when the calendar field is empty (no text, no rule, no references). */
-export function toRequirementLite(req: Requirement): RequirementLite | undefined {
+/**
+ * Splits a requirement's references by role. A same-campus id that is not a catalog course is
+ * never an edge, whichever list (or rule leaf) it came from; mentions never become edges.
+ */
+export function requirementRefs(req: Requirement, scope?: IdScope): RequirementRefs {
+  const referenced = uniqueSorted([...req.courseIds, ...ruleCourseIds(req.rule)])
+  const missing = (id: string) => scope !== undefined && id.startsWith(`${scope.campus}:`) && !scope.courseIds.has(id)
+  const ids = referenced.filter(id => !missing(id))
+  const unresolved = uniqueSorted([...(req.unresolvedIds ?? []), ...referenced.filter(missing)])
+  const taken = new Set([...ids, ...unresolved])
+  const mentioned = uniqueSorted(req.mentionedIds ?? []).filter(id => !taken.has(id))
+  return { ids, mentioned, unresolved }
+}
+
+/** `undefined` when the calendar field is empty (no text, no rule, no references or mentions). */
+export function toRequirementLite(req: Requirement, scope?: IdScope): RequirementLite | undefined {
   const text = normaliseText(req.rawText)
-  const ids = requirementIds(req)
-  if (text === '' && req.rule.kind === 'true' && ids.length === 0) return undefined
-  return { text, rule: canonicalRule(req.rule), ids }
+  const { ids, mentioned, unresolved } = requirementRefs(req, scope)
+  if (text === '' && req.rule.kind === 'true' && ids.length + mentioned.length + unresolved.length === 0) return undefined
+  const lite: RequirementLite = { text, rule: canonicalRule(req.rule), ids }
+  if (mentioned.length) lite.mentioned = mentioned
+  if (unresolved.length) lite.unresolved = unresolved
+  return lite
 }
 
-function toGraphCourse(course: Course): GraphCourse {
+function toGraphCourse(course: Course, scope: IdScope): GraphCourse {
   const out: GraphCourse = {
     id: course.id,
     code: course.code,
@@ -436,8 +485,10 @@ function toGraphCourse(course: Course): GraphCourse {
   }
   const distribution = normaliseText(course.distribution)
   if (distribution) out.distribution = distribution
+  const deliveryCampus = normaliseText(course.deliveryCampus)
+  if (deliveryCampus) out.deliveryCampus = deliveryCampus
   for (const [field, key] of REQUIREMENT_FIELDS) {
-    const lite = toRequirementLite(course[field])
+    const lite = toRequirementLite(course[field], scope)
     if (lite) out[key] = lite
   }
   const notes = normaliseText(course.notes)
@@ -445,18 +496,19 @@ function toGraphCourse(course: Course): GraphCourse {
   return out
 }
 
-function toProgramGroupLite(group: ProgramGroup): ProgramGroupLite {
+function toProgramGroupLite(group: ProgramGroup, scope: IdScope): ProgramGroupLite {
   return {
     id: group.id,
     label: normaliseText(group.label),
     category: group.category,
     text: normaliseText(group.rawText),
     rule: canonicalRule(group.rule),
-    ids: requirementIds(group),
+    // ProgramGroupLite has no mention/unresolved lists: only highlightable references are kept.
+    ids: requirementRefs(group, scope).ids,
   }
 }
 
-function toProgramLite(program: Program): ProgramLite {
+function toProgramLite(program: Program, scope: IdScope): ProgramLite {
   const notes = normaliseText(program.notes)
   return {
     id: program.id,
@@ -468,7 +520,7 @@ function toProgramLite(program: Program): ProgramLite {
     ...(notes ? { notes } : {}),
     admissionText: normaliseText(program.admission.rawText),
     completionText: normaliseText(program.completion.rawText),
-    groups: program.groups.map(toProgramGroupLite),
+    groups: program.groups.map(group => toProgramGroupLite(group, scope)),
   }
 }
 
@@ -541,6 +593,7 @@ export function buildCampusDatasets(catalog: Catalog, subjects: SubjectsInput | 
   const { errors, warnings } = validateCatalog(catalog, campus)
   if (errors.length) throw new DataBuildError(`${campus.id} catalog`, errors)
   const courses = [...catalog.courses].sort((a, b) => compareCodeUnits(a.id, b.id))
+  const scope: IdScope = { campus: campus.id, courseIds: new Set(courses.map(course => course.id)) }
   const { divisions, subjects: subjectInfos } = buildSubjects(courses, subjects, warnings)
   const graph: GraphDataset = {
     schemaVersion: 1,
@@ -558,7 +611,7 @@ export function buildCampusDatasets(catalog: Catalog, subjects: SubjectsInput | 
     },
     divisions,
     subjects: subjectInfos,
-    courses: courses.map(toGraphCourse),
+    courses: courses.map(course => toGraphCourse(course, scope)),
   }
   const descriptions: Record<string, string> = {}
   for (const course of courses) {
@@ -568,7 +621,7 @@ export function buildCampusDatasets(catalog: Catalog, subjects: SubjectsInput | 
   return {
     graph,
     details: { schemaVersion: 1, campus: campus.id, descriptions },
-    programs: { schemaVersion: 1, campus: campus.id, programs: catalog.programs.map(toProgramLite).sort(compareProgramLite) },
+    programs: { schemaVersion: 1, campus: campus.id, programs: catalog.programs.map(program => toProgramLite(program, scope)).sort(compareProgramLite) },
     warnings,
   }
 }
@@ -579,7 +632,13 @@ export function summarise(datasets: Pick<CampusDatasets, 'graph' | 'programs'>):
     fetchedAt: datasets.graph.fetchedAt,
     courseCount: datasets.graph.courses.length,
     programCount: datasets.programs.programs.length,
+    subjects: datasets.graph.subjects.map(subject => subject.code),
   }
+}
+
+/** Start subjects of an available campus that its dataset does not contain. */
+export function missingStartSubjects(campus: CampusSource, summary: CampusSummary): string[] {
+  return (campus.startSubjects ?? []).filter(code => !summary.subjects.includes(code))
 }
 
 /** Available campuses carry their data path and counts; planned ones are listed without data. */
@@ -592,13 +651,19 @@ export function buildRegistry(source: CampusSourceRegistry, summaries: ReadonlyM
       status: campus.status,
       calendarUrl: campus.calendarUrl,
     }
-    if (campus.status !== 'available') return entry
+    if (campus.status !== 'available') {
+      if (campus.startSubjects?.length) entry.startSubjects = [...campus.startSubjects]
+      return entry
+    }
     const summary = summaries.get(campus.id)
     if (!summary) throw new DataBuildError('campus registry', [`no dataset was built for available campus ${campus.id}`])
     entry.dataPath = `${campus.dataDir}/`
     entry.academicYear = summary.academicYear
     entry.courseCount = summary.courseCount
     entry.programCount = summary.programCount
+    const missing = missingStartSubjects(campus, summary)
+    const start = (campus.startSubjects ?? []).filter(code => !missing.includes(code))
+    if (start.length) entry.startSubjects = start
     return entry
   })
   const latest = [...summaries.values()]
@@ -647,7 +712,10 @@ export function generateFrontendData(root: string): Generation {
     }
     const built = buildCampusDatasets(catalog, subjects, campus)
     warnings.push(...built.warnings.map(warning => `${campus.id}: ${warning}`))
-    summaries.set(campus.id, summarise(built))
+    const summary = summarise(built)
+    const missing = missingStartSubjects(campus, summary)
+    if (missing.length) warnings.push(`${campus.id}: startSubjects not in the catalog (dropped): ${missing.join(', ')}`)
+    summaries.set(campus.id, summary)
     const out = `public/data/${campus.dataDir}`
     files.push(
       { path: `${out}/graph.json`, content: serialise(built.graph) },

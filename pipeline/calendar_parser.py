@@ -1,271 +1,209 @@
-"""Conservative Calendar requirement parser and auditable single-snapshot builder.
+"""Calendar detail pages -> auditable single-snapshot catalog for one campus.
 
-An extracted course reference is not a mandatory requirement. The parser only
-emits executable rules for grammar it understands completely; prose stays unknown.
+``build_catalog`` parses a verified collection (see cache.py), writes candidate files into the
+campus cache and, with ``accept=True``, replaces the published snapshot in ``data/<dataDir>/``.
+Requirement roles (which codes are edges) are decided in references.py; the expression grammar
+lives in rules.py.
 """
 from __future__ import annotations
 
 from collections import Counter, defaultdict
 import json
-from pathlib import Path
 import re
 
 from bs4 import BeautifulSoup, Tag
 
-ROOT = Path(__file__).resolve().parents[1]
-CACHE = ROOT / '.cache' / 'calendar'
-OUT = ROOT / 'data' / 'utm'
-PARSER_VERSION = '1.0.1'
-COURSE_PATTERN = r'[A-Z]{3}(?:\d{3}|[A-Z]\d{2})[HY][135]'
-COURSE_RE = re.compile(r'\b' + COURSE_PATTERN + r'\b')
+from .cache import read_verified_source, validate_manifest_cache
+from .campuses import ROOT, UTM, Campus
+from .files import read_json, write_json, write_text
+from .references import NO_CONTEXT, CodeContext, analyse, combine_tails, guard, partition, prune_any, strip_unresolved
+from .rules import COURSE_PATTERN, COURSE_RE, clean, combine, course_id, exclusion_rule, parse_rule, refs, unknown, walk
+
+PARSER_VERSION = '1.1.0'
+REQUIREMENT_FIELDS = ['prerequisites', 'corequisites', 'exclusions', 'recommended', 'restrictions']
+OPTIONAL_COURSE_FIELDS = ['deliveryCampus', 'courseExperience', 'internationalComponent']
+# Retired codes are removed from these ASTs instead of becoming unknown leaves.
+DROP_UNRESOLVED_FIELDS = {'exclusions', 'recommended'}
+FORMERLY_LEAD = re.compile(r'^\(?\s*formerly:?\s+(' + COURSE_PATTERN + r'(?:\s*(?:/|,|\bor\b|\band\b)\s*' + COURSE_PATTERN + r')*)', re.I)
+FRAGMENT = re.compile(r'[\W_]*(?:(?:and|or)\b[\W_]*)*', re.I)
 
 
-def clean(text):
-    return re.sub(r'\s+', ' ', text.replace('\u200b', '').replace('\xa0', ' ')).strip()
+class Audit:
+    """Parser observations that belong in the quality report, not in the catalog."""
+
+    def __init__(self):
+        self.repairs = []
+        self.aliases = []
+        self.corequisite_moves = []
+        self.program_codes = []
+
+    def record(self, entity_id, field_name, analysis):
+        for repair in analysis.repairs:
+            self.repairs.append({'entityId': entity_id, 'field': field_name, **repair})
+        for alias in analysis.aliases:
+            self.add_alias(entity_id, field_name, alias['formerly'], alias['current'])
+
+    def add_alias(self, entity_id, field_name, formerly, current):
+        self.aliases.append({'formerly': course_id(formerly), 'current': course_id(current) if current else None,
+                             'entityId': entity_id, 'field': field_name})
 
 
-def course_id(code):
-    return {'5': 'UTM', '1': 'UTSG', '3': 'UTSC'}.get(code[-1], 'external') + ':' + code
+def build_requirement(raw, url, analysis, ctx: CodeContext, rule):
+    """Requirement dict: courseIds are the only references that may become graph edges."""
+    resolved, unresolved = partition(analysis.required, ctx)
+    alias_resolved, alias_unresolved = partition(analysis.alias_codes, ctx)
+    demoted = {course_id(code) for code in analysis.demoted}
+    if demoted:
+        rule = prune_any(rule, demoted)
+    drop = analysis.field_name in DROP_UNRESOLVED_FIELDS
+    rule = guard(strip_unresolved(rule, unresolved, analysis.text, drop), resolved, analysis.text)
+    mentioned = sorted(({course_id(code) for code in analysis.mentioned} | set(alias_resolved)) - set(resolved) - set(unresolved))
+    unresolved = sorted(set(unresolved) | set(alias_unresolved))
+    result = {'rawText': raw, 'sourceUrl': url, 'rule': rule, 'courseIds': resolved}
+    if mentioned:
+        result['mentionedIds'] = mentioned
+    if unresolved:
+        result['unresolvedIds'] = unresolved
+    return result
 
 
-def refs(text):
-    return sorted({course_id(code) for code in COURSE_RE.findall(text)})
+def course_requirement(raw, url, ctx: CodeContext, field_name, code, parser=parse_rule):
+    analysis = analyse(raw, ctx, field_name, code)
+    if analysis.no_prerequisites or analysis.advisory:
+        rule = {'kind': 'true'}
+    else:
+        rule = combine_tails(parser(analysis.rule_text), analysis.tails)
+    return build_requirement(raw, url, analysis, ctx, rule), analysis
 
 
-def unknown(text, reason='Unrecognized or context-dependent official wording; manual confirmation required'):
-    return {'kind': 'unknown', 'text': text, 'reason': reason}
-
-
-def combine(kind, items):
-    if not items:
-        return {'kind': 'true'}
-    if len(items) == 1:
-        return items[0]
-    return {'kind': kind, 'items': items}
-
-
-def balanced_outer(text):
-    if not text.startswith('(') or not text.endswith(')'):
-        return False
-    level = 0
-    for i, char in enumerate(text):
-        level += (char == '(') - (char == ')')
-        if level == 0 and i != len(text) - 1:
-            return False
-    return level == 0
-
-
-def split_top(text, pattern):
-    depth = 0
-    starts = {match.start(): match for match in re.finditer(pattern, text, re.I)}
-    parts = []
-    last = 0
-    i = 0
-    while i < len(text):
-        if text[i] == '(':
-            depth += 1
-        elif text[i] == ')':
-            depth -= 1
-        if depth == 0 and i in starts:
-            match = starts[i]
-            parts.append(text[last:i].strip())
-            last = match.end()
-            i = match.end()
-        else:
-            i += 1
-    if not parts:
-        return [text]
-    parts.append(text[last:].strip())
-    return parts
-
-
-def parse_rule(raw):
-    """Parse explicit AND/OR, course-specific grades, credit sets and permissions.
-
-    Slash binds within comma/semicolon AND groups. Verbal OR combines complete
-    AND alternatives. Brackets preserve boundaries. Unknown prose is never erased.
-    """
-    text = clean(raw).strip(' .;')
-    if not text or text.lower() in {'none', 'n/a', 'no prerequisites', 'no prerequisite'}:
-        return {'kind': 'true'}
-    text = text.replace('[', '(').replace(']', ')').replace('{', '(').replace('}', ')')
-    if re.search(r'\bgrade\b', text, re.I) and len(split_top(text, r'\s+or\s+|\s*/\s*')) > 1:
-        # A grade qualifier before/after a choice may apply to every alternative.
-        # Only per-course parenthetical percentage annotations are unambiguous.
-        without_annotations = re.sub(r'\([^()]*(?:grade|%)\s*[^()]*\)', '', text, flags=re.I)
-        if re.search(r'\bgrade\b', without_annotations, re.I):
-            return unknown(raw, 'Grade scope over alternatives needs manual confirmation')
-    # Convert grade annotations into a single atomic token before group parsing.
-    text = re.sub(r'(?:a\s+)?(?:minimum|final)\s+grade\s+of\s+(?:at\s+least\s+)?(\d+(?:\.\d+)?)\s*%?\s+in\s+(' + COURSE_PATTERN + ')',
-                  lambda m: m[2] + '@' + m[1], text, flags=re.I)
-    text = re.sub(r'(' + COURSE_PATTERN + r')\s*\(\s*(?:(?:a\s+)?(?:minimum|final)\s+grade\s+of\s+)?(?:at\s+least\s+)?(\d+(?:\.\d+)?)\s*%\s*\)',
-                  lambda m: m[1] + '@' + m[2], text, flags=re.I)
-    while balanced_outer(text):
-        text = text[1:-1].strip()
-    if text.count('(') != text.count(')'):
-        return unknown(raw, 'Unbalanced official expression')
-    # Numeric course-set requirement is interpreted before separators in its set.
-    credits = re.fullmatch(r'(?:select\s+|at least\s+|a minimum of\s+|additional\s+)?(\d+(?:\.\d+)?)\s+credits?\s+(?:from|in)\s+(?:the following(?: courses)?\s*:?\s*)?(.+)', text, re.I)
-    if credits:
-        minimum, scope = float(credits[1]), credits[2]
-        reduced = COURSE_RE.sub('', scope)
-        reduced = re.sub(r'\b(?:and|or)\b|[\s,;/()&+.]', '', reduced, flags=re.I)
-        # A credit pool is flat. Grouped alternatives cannot be flattened: A+C
-        # must not satisfy "(A and B) or (C and D)".
-        flat = not any(mark in scope for mark in '()[]{}') and not re.search(r'\band\b|[&+;]', scope, re.I)
-        if flat and not reduced and refs(scope):
-            return {'kind': 'credits', 'minimum': minimum, 'courseIds': refs(scope)}
-        subject_level = re.fullmatch(r'([A-Z]{3})\s+(?:at\s+)?(?:the\s+)?(\d)00(?:\s*(?:/|and|or)\s*400)?[- ]level(?:\s+(?:or above|or higher))?', scope)
-        if subject_level and (int(subject_level[2]) == 4 or 'above' in scope or 'higher' in scope or '400' in scope):
-            return {'kind': 'credits', 'minimum': minimum, 'subject': subject_level[1], 'level': int(subject_level[2]) * 100}
-        return unknown(raw, 'Credit-set grouping, allocation or level restrictions need manual confirmation')
-    total = re.fullmatch(r'(?:completion of\s+|completed\s+)?(?:at least\s+|a minimum of\s+)?(\d+(?:\.\d+)?)\s+(?:total\s+)?credits?', text, re.I)
-    if total:
-        return {'kind': 'credits', 'minimum': float(total[1])}
-    # A credit qualifier can govern a following OR list ("8.0 credits including
-    # A or B"). Never let a later course branch bypass the credit condition.
-    if re.search(r'\bcredits?\b', text, re.I):
-        return unknown(raw, 'Credit total and included-course scope require contextual confirmation')
-    # A bare one-of list is OR, including official comma-separated lists.
-    one_of = re.match(r'^(?:one of|either|any one of)(?: the following)?\s*:?\s*(.+)$', text, re.I)
-    if one_of:
-        body = one_of[1]
-        if len(split_top(body, r'\s+and\s+|\s*[&+]\s*')) > 1:
-            return unknown(raw, 'Scope of one-of list and additional AND condition is ambiguous')
-        residual = COURSE_RE.sub('', body)
-        residual = re.sub(r'\b(?:and|or)\b|[\s,;/()&+.]', '', residual, flags=re.I)
-        if residual:
-            return unknown(raw, 'One-of list contains modifiers that require contextual confirmation')
-        items = split_top(body, r'\s+or\s+|\s*/\s*|\s*,\s*|\s*;\s*')
-        return combine('any', [parse_rule(part) for part in items if part])
-    # Oxford lists only when the entire expression is a simple course list.
-    if ', or ' in text.lower():
-        reduced = COURSE_RE.sub('', text)
-        reduced = re.sub(r'\b(?:or)\b|[\s,()]', '', reduced, flags=re.I)
-        if not reduced:
-            return combine('any', [parse_rule(p) for p in re.split(r',\s*(?:or\s+)?|\s+or\s+', text, flags=re.I) if p])
-    for pattern, kind in [(r'\s*;\s*(?:and\s+)?|\s*,\s*(?:and\s+)?', 'all'),
-                          (r'\s+or\s+', 'any'), (r'\s+and\s+|\s*[&+]\s*', 'all'),
-                          (r'\s*/\s*', 'any')]:
-        pieces = split_top(text, pattern)
-        if len(pieces) > 1:
-            # Trailing "and/or" is a list continuation, not a false empty condition.
-            if any(not p for p in pieces):
-                return unknown(raw, 'Incomplete or ambiguous conjunction')
-            children = [parse_rule(part) for part in pieces]
-            if kind == 'any' and any(node['kind'] == 'unknown' for child in children for node in walk(child)):
-                return unknown(raw, 'OR expression contains unparsed qualifiers; their scope cannot be safely discarded')
-            return combine(kind, children)
-    atom = re.fullmatch('(' + COURSE_PATTERN + r')(?:@(\d+(?:\.\d+)?))?', text)
-    if atom:
-        return ({'kind': 'minGrade', 'courseId': course_id(atom[1]), 'minimum': float(atom[2])}
-                if atom[2] else {'kind': 'course', 'courseId': course_id(atom[1])})
-    if re.fullmatch(r'(?:written\s+)?(?:permission|approval|consent)\s+of\s+(?:the\s+)?(?:instructor|department|program director|supervisor|chair)[\w\s.-]*', text, re.I):
-        return {'kind': 'permission', 'text': raw}
-    return unknown(raw)
-
-
-def requirement(text, url, rule=None):
-    return {'rawText': text, 'sourceUrl': url, 'rule': parse_rule(text) if rule is None else rule, 'courseIds': refs(text)}
-
-
-def exclusion_rule(text):
-    """A plain list names independent exclusion triggers, not all-at-once prerequisites."""
-    if not text:
-        return {'kind': 'true'}
-    residual = COURSE_RE.sub('', text)
-    residual = re.sub(r'\b(?:or|and)\b|[\s,;/&+.]', '', residual, flags=re.I)
-    if not residual and refs(text):
-        return combine('any', [{'kind': 'course', 'courseId': reference} for reference in refs(text)])
-    # Parenthetical exceptions, transfer policies and combined-course exclusions
-    # cannot safely use prerequisite expression semantics.
-    return unknown(text, 'Context-dependent exclusion; confirm official credit restrictions')
+def requirement(text, url, rule=None, ctx: CodeContext = NO_CONTEXT, field_name='group'):
+    """Generic requirement (program-level text) with negation masking and code repair."""
+    analysis = analyse(text, ctx, field_name)
+    return build_requirement(text, url, analysis, ctx, parse_rule(analysis.rule_text) if rule is None else rule)
 
 
 def field(soup, name):
-    return soup.select_one('.node__content .field--name-field-' + name + ' .field__item')
+    return soup.select_one('.node__content .field--name-' + name + ' .field__item')
 
 
 def text_field(soup, name):
-    el = field(soup, name)
+    el = field(soup, name) if name else None
     return clean(el.get_text(' ', strip=True)) if el else ''
 
 
-def source(entry, manifest):
-    from collect_calendar import read_verified_source
+def source(entry, manifest, campus: Campus = UTM):
     reference = next(item for item in manifest['details'] if item['url'] == entry['url'] and item.get('status') == 'ok')
-    return read_verified_source(reference, manifest['generationId'], CACHE)
+    return read_verified_source(reference, manifest['generationId'], campus.cache_dir)
 
 
-def parse_course(entry, source_data):
+def parse_course(entry, source_data, campus: Campus = UTM, ctx: CodeContext = NO_CONTEXT, audit: Audit | None = None):
+    audit = audit or Audit()
+    fields = campus.course_fields
     soup = BeautifulSoup(source_data['html'], 'html.parser')
-    title_node = soup.select_one('h1.page-title')
+    title_node = soup.select_one(campus.title_selector)
     heading = clean(title_node.get_text(' ', strip=True)) if title_node else ''
     code = entry['code']
-    if not heading.startswith(code) or not soup.select_one('article.node--type-courses'):
+    if not heading.startswith(code) or not soup.select_one(campus.course_article_selector):
         raise ValueError('Detail identity mismatch: ' + entry['url'])
+    cid = course_id(code)
     url = source_data['finalUrl']
-    pre = text_field(soup, 'prerequisite')
-    core = text_field(soup, 'corequisite')
-    recommended = text_field(soup, 'recommended-preparation')
-    notes = text_field(soup, 'note')
-    # CHM and other explicitly recommended co-requisites are advisory, even when
-    # Drupal places them in the corequisite field. Preserve complete source text.
-    if re.match(r'^recommended\s+co-?requisite', core, re.I):
+    pre = text_field(soup, fields['prerequisites'])
+    core = text_field(soup, fields['corequisites'])
+    recommended = text_field(soup, fields['recommended'])
+    notes = text_field(soup, fields['notes'])
+    description = text_field(soup, fields['description'])
+    # Advisory corequisites ("Recommended Corequisite", "Highly Recommended", "(strongly
+    # recommended ...)") never block: their codes become mentions and their text moves to
+    # recommended. The official field text is always kept verbatim in rawText.
+    core_req, core_analysis = course_requirement(core, url, ctx, 'corequisites', code)
+    if core_analysis.advisory:
         recommended = clean(recommended + ' ' + core)
-        core_req = requirement(core, url, {'kind': 'true'})
-        core_req['courseIds'] = []
-    else:
-        core_req = requirement(core, url)
-    # A recommendation sentence mixed into prerequisites is kept verbatim in
-    # prerequisite provenance but removed from the mandatory expression.
-    mandatory_pre = pre
-    advisory = re.search(r'\s+and\s+([^;]+?\b(?:highly\s+)?recommended)\.?$', pre, re.I)
-    if advisory:
-        recommended = clean(recommended + ' ' + advisory[1])
-        mandatory_pre = pre[:advisory.start()]
-    prereq = requirement(pre, url, parse_rule(mandatory_pre))
-    if advisory:
-        prereq['courseIds'] = refs(mandatory_pre)
-    return {'id': course_id(code), 'campus': 'UTM', 'code': code,
-            'title': heading[len(code):].lstrip(' •·-'), 'subject': code[:3], 'level': int(code[3]) * 100,
-            'credits': .5 if code[-2] == 'H' else 1, 'description': text_field(soup, 'desc'),
-            'sourceUrl': url, 'contentHash': source_data['contentHash'], 'fetchedAt': source_data['fetchedAt'],
-            'prerequisites': prereq, 'corequisites': core_req,
-            'exclusions': requirement(text_field(soup, 'exclusion'), url, exclusion_rule(text_field(soup, 'exclusion'))),
-            'recommended': requirement(recommended, url),
-            'restrictions': requirement(text_field(soup, 'enrolment-limits'), url),
-            'notes': notes, 'distribution': text_field(soup, 'distribution-requirements')}
+    prereq, pre_analysis = course_requirement(pre, url, ctx, 'prerequisites', code)
+    if pre_analysis.advisory:
+        recommended = clean(recommended + ' ' + pre)
+    elif pre_analysis.advisory_text:
+        recommended = clean(recommended + ' ' + pre_analysis.advisory_text)
+    if pre_analysis.corequisite:
+        # "(may be taken as a corequisite)": the courses are corequisite references.
+        moved, moved_unresolved = partition(pre_analysis.corequisite, ctx)
+        core_req['courseIds'] = sorted(set(core_req['courseIds']) | set(moved))
+        if moved_unresolved:
+            core_req['unresolvedIds'] = sorted(set(core_req.get('unresolvedIds', [])) | set(moved_unresolved))
+        audit.corequisite_moves.append({'entityId': cid, 'courseIds': moved + moved_unresolved})
+    exclusions, exclusion_analysis = course_requirement(text_field(soup, fields['exclusions']), url, ctx, 'exclusions', code, exclusion_rule)
+    recommended_req, recommended_analysis = course_requirement(recommended, url, ctx, 'recommended', code)
+    restrictions, restriction_analysis = course_requirement(text_field(soup, fields['restrictions']), url, ctx, 'restrictions', code)
+    for name, analysis in [('prerequisites', pre_analysis), ('corequisites', core_analysis), ('exclusions', exclusion_analysis),
+                           ('recommended', recommended_analysis), ('restrictions', restriction_analysis)]:
+        audit.record(cid, name, analysis)
+    for name, text in [('description', description), ('notes', notes)]:
+        lead = FORMERLY_LEAD.match(text)
+        if lead:
+            for old in COURSE_RE.findall(lead[1]):
+                audit.add_alias(cid, name, old, code)
+    course = {'id': cid, 'campus': campus.id, 'code': code,
+              'title': heading[len(code):].lstrip(campus.title_separators), 'subject': code[:3], 'level': campus.course_level(code),
+              'credits': campus.course_credits(code), 'description': description,
+              'sourceUrl': url, 'contentHash': source_data['contentHash'], 'fetchedAt': source_data['fetchedAt'],
+              'prerequisites': prereq, 'corequisites': core_req, 'exclusions': exclusions,
+              'recommended': recommended_req, 'restrictions': restrictions,
+              'notes': notes, 'distribution': text_field(soup, fields['distribution'])}
+    for name in OPTIONAL_COURSE_FIELDS:
+        value = text_field(soup, fields.get(name))
+        if value:
+            course[name] = value
+    return course
 
 
-def program_groups(item, url, code, category):
+def list_items(node):
+    """Items of an ol/ul; a nested list placed beside the items belongs to the item before it."""
+    items = []
+    for child in node.children:
+        if not isinstance(child, Tag):
+            continue
+        if child.name == 'li':
+            items.append(child.get_text(' ', strip=True))
+        elif child.name in {'ol', 'ul'}:
+            if items:
+                items[-1] += ' ' + child.get_text(' ', strip=True)
+            else:
+                items += list_items(child)
+    return items
+
+
+def program_groups(item, url, code, category, campus: Campus = UTM, ctx: CodeContext = NO_CONTEXT):
     if item is None:
         return []
     groups = []
     heading = category.title()
     cohort = ''
     pending = ''
-    conditional = ''
-    def add(text, label, scoped=cohort):
+    route = ''
+
+    def add(text, label, scoped):
         text = clean(text)
-        if not text:
+        if not text or FRAGMENT.fullmatch(text):
             return
         # A leading decimal is a credit amount, not an outline marker: removing
         # "1." from "1.0 credit" would silently turn the minimum into zero.
-        rule = parse_rule(re.sub(r'^\d+(?:\.(?!\d)|\))\s*', '', text))
-        context = conditional
+        analysis = analyse(re.sub(r'^\d+(?:\.(?!\d)|\))\s*', '', text), ctx, 'group')
+        rule = parse_rule(analysis.rule_text)
+        if analysis.demoted:
+            rule = prune_any(rule, {course_id(c) for c in analysis.demoted})
+        context = route
         if category == 'admission':
             context = context or 'Admission clauses depend on the complete program admission policy and route.'
         if re.search(r'\b(?:group\s+[A-Z0-9]|list\s+[A-Z0-9]|cluster\s+[A-Z0-9]|electives?|option|stream)\b', label, re.I):
             context = context or label
-        if context:
+        if context and not text.startswith(context):
             rule = combine('all', [unknown(context, 'Parent requirement context, route or elective allocation must be confirmed'), rule])
             text = clean(context + ' ' + text)
         if scoped:
             rule = {'kind': 'applicability', 'cohort': scoped, 'rule': rule}
-        group = requirement(text, url, rule)
-        group.update({'id': f'UTM:{code}:{category}:{len(groups) + 1}', 'label': label[:180], 'category': category})
+        group = requirement(text, url, rule, ctx)
+        group.update({'id': f'{campus.id}:{code}:{category}:{len(groups) + 1}', 'label': label[:180], 'category': category})
         groups.append(group)
+
     for child in item.children:
         if not isinstance(child, Tag):
             continue
@@ -277,22 +215,32 @@ def program_groups(item, url, code, category):
                 add(pending + ' ' + text, heading, cohort)
                 pending = ''
             else:
-                for number, li in enumerate(child.find_all('li', recursive=False), 1):
-                    add(li.get_text(' ', strip=True), f'{heading} · {number}', cohort)
+                for number, entry in enumerate(list_items(child), 1):
+                    add(entry, f'{heading} · {number}', cohort)
             continue
-        if re.search(r'\b(?:UTMCIP|co-?op|stream|option|focus)\b', text, re.I):
-            conditional = text
-        if re.search(r'(?:for students|students who|students entering|admitted|entry|entering).*(?:20\d\d|CMP1)', text, re.I):
+        # A stream/co-op/option paragraph frames only the list that directly follows it.
+        route = text if re.search(campus.route_cue_re, text, re.I) else ''
+        if re.search(campus.cohort_cue_re, text, re.I):
             cohort = text
             heading = text
             add(text, heading, cohort)
             continue
         if re.search(r'all students have the same', text, re.I):
             cohort = ''
-            conditional = ''
+            route = ''
+            heading = text
+            continue
+        if re.fullmatch(r'notes?\s*:?', text, re.I):
+            if pending:
+                add(pending, heading, cohort)
+            cohort = ''
+            route = ''
+            pending = ''
             heading = text
             continue
         if not refs(text) and re.search(r'(?:credits?.*(?:from|following|list)|one of the following|program electives)', text, re.I):
+            if pending:
+                add(pending, heading, cohort)
             heading = text
             pending = text
             continue
@@ -309,39 +257,39 @@ def program_groups(item, url, code, category):
     return groups
 
 
-def parse_program(entry, source_data):
+def parse_program(entry, source_data, campus: Campus = UTM, ctx: CodeContext = NO_CONTEXT, audit: Audit | None = None):
+    audit = audit or Audit()
+    fields = campus.program_fields
     soup = BeautifulSoup(source_data['html'], 'html.parser')
-    heading = clean(soup.select_one('h1.page-title').get_text(' ', strip=True))
-    if not soup.select_one('article.node'):
+    heading = clean(soup.select_one(campus.title_selector).get_text(' ', strip=True))
+    if not soup.select_one(campus.program_article_selector):
         raise ValueError('Program detail content missing: ' + entry['url'])
     code, url = entry['code'], source_data['finalUrl']
-    official_code = text_field(soup, 'post-code')
-    if official_code and re.fullmatch(r'ER[A-Z]+\d+', code) and code not in official_code.upper():
+    official_code = text_field(soup, fields['code'])
+    if official_code and re.fullmatch(campus.post_code_re, code) and code not in official_code.upper():
         raise ValueError('Program identity mismatch: ' + entry['url'])
     type_match = re.search(r'\b(Specialist|Major|Minor|Certificate|Focus)\b', heading, re.I)
     program_type = type_match[1].title() if type_match else 'Other'
-    admission = text_field(soup, 'enrolment-requirements')
-    completion = text_field(soup, 'completion-req')
-    groups = program_groups(field(soup, 'enrolment-requirements'), url, code, 'admission')
-    groups += program_groups(field(soup, 'completion-req'), url, code, 'completion')
+    admission = text_field(soup, fields['admission'])
+    completion = text_field(soup, fields['completion'])
+    groups = program_groups(field(soup, fields['admission']), url, code, 'admission', campus, ctx)
+    groups += program_groups(field(soup, fields['completion']), url, code, 'completion', campus, ctx)
     def whole(text, category):
         # Full programs include overlap, subclauses, annual cutoffs and alternate
         # paths. Leaf groups support explainable recommendations, not certification.
         return requirement(text, url, unknown(text, f'Full program {category} requires official contextual and allocation review')
-                           if text else unknown('', f'Official {category} field absent; not assumed to have no requirements'))
-    return {'id': 'UTM:' + code, 'campus': 'UTM', 'code': official_code or code, 'title': heading,
-            'type': program_type, 'description': text_field(soup, 'description'), 'sourceUrl': url,
-            'contentHash': source_data['contentHash'], 'fetchedAt': source_data['fetchedAt'],
-            'admission': whole(admission, 'admission'), 'completion': whole(completion, 'completion'),
-            'groups': groups, 'notes': text_field(soup, 'program-note')}
-
-
-def walk(rule):
-    yield rule
-    for item in rule.get('items', []):
-        yield from walk(item)
-    if 'rule' in rule:
-        yield from walk(rule['rule'])
+                           if text else unknown('', f'Official {category} field absent; not assumed to have no requirements'), ctx)
+    program = {'id': campus.id + ':' + code, 'campus': campus.id, 'code': official_code or code}
+    if not re.search(campus.post_code_re, official_code):
+        # Focus programs print their name in the POSt code field: the URL slug is the code.
+        program['code'] = code
+        program['codeSource'] = 'url-slug'
+        audit.program_codes.append({'entityId': program['id'], 'code': code, 'postCodeField': official_code})
+    program.update({'title': heading, 'type': program_type, 'description': text_field(soup, fields['description']), 'sourceUrl': url,
+                    'contentHash': source_data['contentHash'], 'fetchedAt': source_data['fetchedAt'],
+                    'admission': whole(admission, 'admission'), 'completion': whole(completion, 'completion'),
+                    'groups': groups, 'notes': text_field(soup, fields['notes'])})
+    return program
 
 
 def cycles(courses):
@@ -378,15 +326,27 @@ def cycles(courses):
     return sorted(found)
 
 
-def quality(catalog, manifest, parse_failures):
+def alias_table(audit: Audit, ids):
+    grouped = {}
+    for alias in audit.aliases:
+        key = (alias['formerly'], alias['current'])
+        row = grouped.setdefault(key, {'formerly': alias['formerly'], 'current': alias['current'],
+                                       'formerlyInCatalog': alias['formerly'] in ids, 'citedBy': set()})
+        row['citedBy'].add(alias['entityId'] + ' ' + alias['field'])
+    return [{**row, 'citedBy': sorted(row['citedBy'])} for _, row in sorted(grouped.items(), key=lambda item: (item[0][0], item[0][1] or ''))]
+
+
+def quality(catalog, manifest, parse_failures, campus: Campus = UTM, audit: Audit | None = None):
+    audit = audit or Audit()
     ids = {c['id'] for c in catalog['courses']}
     ast = Counter()
-    missing = defaultdict(set)
+    missing = defaultdict(lambda: {'roles': set(), 'referencedBy': set()})
     unknowns = []
     field_summary = defaultdict(Counter)
+    role_counts = defaultdict(Counter)
     requirements = []
     for course in catalog['courses']:
-        for key in ['prerequisites', 'corequisites', 'exclusions', 'recommended', 'restrictions']:
+        for key in REQUIREMENT_FIELDS:
             requirements.append((course['id'], key, course[key]))
     for program in catalog['programs']:
         for key in ['admission', 'completion']:
@@ -396,7 +356,8 @@ def quality(catalog, manifest, parse_failures):
         nodes = list(walk(requirement_value['rule']))
         ast.update(node['kind'] for node in nodes)
         is_unknown = any(node['kind'] in {'unknown', 'applicability'} for node in nodes)
-        summary = field_summary[name if ':' not in name else 'programGroups']
+        bucket = name if ':' not in name else 'programGroups'
+        summary = field_summary[bucket]
         summary['unknown' if is_unknown else 'parsed'] += 1
         summary['nonempty' if requirement_value['rawText'] else 'absentOrEmpty'] += 1
         if requirement_value['rawText'] and not is_unknown:
@@ -405,15 +366,31 @@ def quality(catalog, manifest, parse_failures):
             unknowns.append({'entityId': entity_id, 'field': name, 'sourceUrl': requirement_value['sourceUrl'],
                              'text': requirement_value['rawText'][:300],
                              'reasons': sorted({node.get('reason', 'Cohort applicability requires confirmation') for node in nodes if node['kind'] in {'unknown', 'applicability'}})})
-        for referenced in requirement_value['courseIds']:
-            if referenced not in ids:
-                missing[referenced].add(entity_id)
+        for role, key in [('required', 'courseIds'), ('unresolved', 'unresolvedIds'), ('mentioned', 'mentionedIds')]:
+            role_counts[bucket][key] += len(requirement_value.get(key, []))
+            for referenced in requirement_value.get(key, []):
+                if referenced not in ids:
+                    missing[referenced]['roles'].add(role)
+                    missing[referenced]['referencedBy'].add(entity_id)
+    weight = {repair['code']: repair['existing'] for repair in audit.repairs if repair['kind'] == 'weightMismatch'}
+    unresolved_rows = []
+    for key, value in sorted(missing.items()):
+        row = {'courseId': key, 'status': 'external' if not campus.owns(key) else 'unresolved',
+               'roles': sorted(value['roles']), 'referencedBy': sorted(value['referencedBy'])}
+        code = key.split(':', 1)[1]
+        if code in weight:
+            row['existingWeightTwin'] = course_id(weight[code])
+        unresolved_rows.append(row)
     report = {'academicYear': catalog['metadata']['academicYear'], 'generatedAt': manifest.get('finishedAt', manifest['startedAt']),
               'parserVersion': PARSER_VERSION, 'complete': catalog['metadata']['complete'],
               'coverage': {}, 'failures': manifest.get('failures', []) + parse_failures,
               'astCounts': dict(ast), 'ruleCoverage': dict(field_summary), 'unknownRules': unknowns,
-              'unresolvedReferences': [{'courseId': key, 'status': 'external' if not key.startswith('UTM:') else 'unresolved',
-                                        'referencedBy': sorted(values)} for key, values in sorted(missing.items())],
+              'referenceRoles': {bucket: dict(counts) for bucket, counts in sorted(role_counts.items())},
+              'unresolvedReferences': unresolved_rows,
+              'aliases': alias_table(audit, ids),
+              'codeRepairs': sorted(audit.repairs, key=lambda r: (r['entityId'], r['field'], r['kind'], r.get('text', r.get('code', '')))),
+              'corequisiteMoves': audit.corequisite_moves,
+              'programCodeFallbacks': audit.program_codes,
               'cycles': cycles(catalog['courses']),
               'cycleMeaning': 'Strongly connected components of all prerequisite references, including OR alternatives and unknown clauses; not guaranteed impossible study paths.',
               'manualCorrections': [], 'programTypes': dict(Counter(p['type'] for p in catalog['programs'])),
@@ -428,94 +405,132 @@ def quality(catalog, manifest, parse_failures):
     return report
 
 
-def build_catalog(manifest, allow_decrease=False, accept=False):
-    from collect_calendar import validate_manifest_cache, write_json
-    validate_manifest_cache(manifest, CACHE)
-    catalog = {'schemaVersion': 1, 'metadata': {'campus': 'UTM', 'academicYear': manifest['academicYear'],
+def snapshot_diff(catalog, report, out_dir, allow_decrease):
+    prior_path = out_dir / 'catalog.json'
+    diff = {'previousSnapshot': prior_path.exists(), 'courses': {}, 'programs': {}}
+    if not prior_path.exists():
+        return diff
+    old = read_json(prior_path)
+    for plural in ['courses', 'programs']:
+        before = {x['id']: x for x in old[plural]}
+        after = {x['id']: x for x in catalog[plural]}
+        rule_fields = REQUIREMENT_FIELDS if plural == 'courses' else ['admission', 'completion']
+        diff[plural] = {'added': sorted(after.keys() - before.keys()), 'removed': sorted(before.keys() - after.keys()),
+                        'changedSource': sorted(k for k in before.keys() & after.keys() if before[k]['contentHash'] != after[k]['contentHash']),
+                        'changedRequirements': sorted(k for k in before.keys() & after.keys()
+                                                      if any(before[k][name]['rawText'] != after[k][name]['rawText'] for name in rule_fields)),
+                        'before': len(before), 'after': len(after)}
+        if len(after) < .9 * len(before) and not allow_decrease:
+            report['failures'].append({'error': f'{plural} count declined >10%; inspect candidate and rerun with --allow-decrease only after review'})
+    prior_report_path = out_dir / 'quality-report.json'
+    if prior_report_path.exists():
+        previous_report = read_json(prior_report_path)
+        diff['ruleCoverage'] = {'before': previous_report.get('ruleCoverage', {}), 'after': report['ruleCoverage']}
+    return diff
+
+
+def quality_markdown(campus: Campus, manifest, catalog, report):
+    external = sum(r['status'] == 'external' for r in report['unresolvedReferences'])
+    unresolved = len(report['unresolvedReferences']) - external
+    prerequisite = report['ruleCoverage']['prerequisites']
+    evidence = manifest['academicYearEvidence']
+    data = f'data/{campus.data_dir}'
+    cache = campus.cache_dir.relative_to(ROOT).as_posix() if campus.cache_dir.is_relative_to(ROOT) else campus.cache_dir.name
+    repairs = Counter(repair['kind'] for repair in report['codeRepairs'])
+    rows = [
+        ('Course directory pages', len(manifest['directories']['course']['pages'])),
+        ('Program directory pages', len(manifest['directories']['program']['pages'])),
+        ('Courses discovered / detail ok / published', f"{len(manifest['directories']['course']['entities'])} / {len(catalog['courses'])} / {len(catalog['courses'])}"),
+        ('Programs discovered / detail ok / published', f"{len(manifest['directories']['program']['entities'])} / {len(catalog['programs'])} / {len(catalog['programs'])}"),
+        ('Collection or parse failures', len(report['failures'])),
+        ('Duplicate directory identities', sum(len(d['duplicates']) for d in manifest['directories'].values())),
+        ('Non-empty prerequisite fields', prerequisite['nonempty']),
+        ('Non-empty prerequisites fully structured', prerequisite.get('nonemptyParsed', 0)),
+        ('Prerequisites with unknown clauses', prerequisite.get('unknown', 0)),
+        ('Requirements (all fields and program groups) with unknown / applicability', len(report['unknownRules'])),
+        ('Other-campus referenced ids', external),
+        (f'{campus.id} ids not in the current calendar (never edges)', unresolved),
+        ('Code typography repaired (glued / spaced / campus digit / suffix)',
+         ' / '.join(str(repairs[kind]) for kind in ['glued', 'spaced', 'campusDigit', 'suffix'])),
+        ('Unrecognised code-like tokens / H-Y weight mismatches (reported only)', f"{repairs['unrecognizedCode']} / {repairs['weightMismatch']}"),
+        ('"(formerly X)" aliases (reported, not substituted)', len(report['aliases'])),
+        ('Prerequisite reference cycles (SCCs)', len(report['cycles'])),
+    ]
+    table = '\n'.join(f'| {label} | {value} |' for label, value in rows)
+    cycle_lines = '\n'.join('- ' + ', '.join(group) for group in report['cycles']) or '- none'
+    return f'''# {campus.id} current snapshot: data quality report
+
+Academic year: {manifest['academicYear']}. Evidence: the page heading `{evidence['heading']}` at {evidence['url']}.
+
+Collection finished: {manifest.get('finishedAt', manifest['startedAt'])} (UTC); parser {PARSER_VERSION}.
+
+| Check | Result |
+| --- | ---: |
+{table}
+
+Complete entity coverage does not mean every requirement is machine-understood. Whole program admission and completion rules stay `unknown` on purpose; requirement groups support sourced planning hints. Annual cutoffs, cohorts, streams, elective-pool allocation, permissions, high-school courses, complex credit combinations and other unparsed wording need manual confirmation. A simple exclusion list means any listed course triggers the exclusion; exclusions with contextual exceptions, or with "and" mixed into an "or" list, stay `unknown`.
+
+Only `courseIds` are graph edges. Codes the text rules out ("except", "excluding", "no longer accepted"), advisory codes ("Highly Recommended", "Recommended Corequisite") and codes in conditional sentences ("Students seeking ...") are kept in `mentionedIds`; {campus.id} codes absent from this calendar are kept in `unresolvedIds`. "(formerly X)" aliases are listed in the quality report and never substituted.
+
+Cycles are computed over all prerequisite references, including OR alternatives and unknown clauses; they do not imply an impossible study path. Other-campus and retired references keep their full code and source; they are never expanded into other catalogs or treated as equivalent courses.
+
+Details: `{data}/manifest.json` keeps every directory URL, page number, entity list, hash, fetch time and detail status; `{data}/quality-report.json` keeps every unknown rule with its reason, cross-campus and retired references with the entities citing them, code repairs, aliases, all cycles and the snapshot diff. Raw HTML stays in the local `{cache}/` cache and is never published to the browser.
+
+Program types: {', '.join(f'{key} {value}' for key, value in sorted(report['programTypes'].items()))}.
+
+## Cycles
+
+{cycle_lines}
+'''
+
+
+def code_context(manifest, campus: Campus):
+    known = frozenset(entry['code'] for entry in manifest['directories']['course']['entities'])
+    year = re.match(r'(20\d\d)', manifest.get('academicYear', ''))
+    return CodeContext(campus.id, campus.campus_digit, known, int(year[1]) if year else None)
+
+
+def parse_snapshot(manifest, campus: Campus = UTM):
+    """Pure parse of a verified collection: (catalog, report without snapshotDiff). Writes nothing."""
+    catalog = {'schemaVersion': 1, 'metadata': {'campus': campus.id, 'academicYear': manifest['academicYear'],
                 'academicYearSource': manifest['academicYearEvidence']['url'],
                 'fetchedAt': manifest.get('finishedAt', manifest['startedAt']), 'parserVersion': PARSER_VERSION,
-                'sources': ['https://utm.calendar.utoronto.ca/course-search', 'https://utm.calendar.utoronto.ca/program-search'],
+                'sources': campus.catalog_sources,
                 'complete': manifest.get('complete', False)}, 'courses': [], 'programs': []}
+    ctx = code_context(manifest, campus)
+    audit = Audit()
     failures = []
     for kind, plural, parse in [('course', 'courses', parse_course), ('program', 'programs', parse_program)]:
         for entry in manifest['directories'][kind]['entities']:
             try:
-                catalog[plural].append(parse(entry, source(entry, manifest)))
+                catalog[plural].append(parse(entry, source(entry, manifest, campus), campus, ctx, audit))
             except Exception as exc:
                 failures.append({'kind': kind, 'code': entry['code'], 'url': entry['url'], 'error': str(exc)})
     catalog['metadata']['complete'] = catalog['metadata']['complete'] and not failures
-    report = quality(catalog, manifest, failures)
-    prior_path = OUT / 'catalog.json'
-    diff = {'previousSnapshot': prior_path.exists(), 'courses': {}, 'programs': {}}
-    if prior_path.exists():
-        old = json.loads(prior_path.read_text(encoding='utf-8'))
-        for plural in ['courses', 'programs']:
-            before = {x['id']: x for x in old[plural]}
-            after = {x['id']: x for x in catalog[plural]}
-            rule_fields = ['prerequisites', 'corequisites', 'exclusions', 'recommended', 'restrictions'] if plural == 'courses' else ['admission', 'completion']
-            diff[plural] = {'added': sorted(after.keys() - before.keys()), 'removed': sorted(before.keys() - after.keys()),
-                            'changedSource': sorted(k for k in before.keys() & after.keys() if before[k]['contentHash'] != after[k]['contentHash']),
-                            'changedRequirements': sorted(k for k in before.keys() & after.keys()
-                                                          if any(before[k][field]['rawText'] != after[k][field]['rawText'] for field in rule_fields)),
-                            'before': len(before), 'after': len(after)}
-            if len(after) < .9 * len(before) and not allow_decrease:
-                report['failures'].append({'error': f'{plural} count declined >10%; inspect candidate and rerun with --allow-decrease only after review'})
-        prior_report_path = OUT / 'quality-report.json'
-        if prior_report_path.exists():
-            previous_report = json.loads(prior_report_path.read_text(encoding='utf-8'))
-            diff['ruleCoverage'] = {'before': previous_report.get('ruleCoverage', {}), 'after': report['ruleCoverage']}
-    report['snapshotDiff'] = diff
+    return catalog, quality(catalog, manifest, failures, campus, audit)
+
+
+def build_catalog(manifest, campus: Campus = UTM, allow_decrease=False, accept=False, allow_planned=False):
+    campus.require_supported(allow_planned)
+    directory, out_dir = campus.cache_dir, campus.out_dir
+    validate_manifest_cache(manifest, directory)
+    catalog, report = parse_snapshot(manifest, campus)
+    report['snapshotDiff'] = snapshot_diff(catalog, report, out_dir, allow_decrease)
     # A second process must not start a new refresh while this parser is reading
     # the previous generation and then let it publish a stale mixed manifest.
-    validate_manifest_cache(manifest, CACHE)
-    write_json(CACHE / 'catalog.candidate.json', catalog)
-    write_json(CACHE / 'quality-report.candidate.json', report)
+    validate_manifest_cache(manifest, directory)
+    write_json(directory / 'catalog.candidate.json', catalog)
+    write_json(directory / 'quality-report.candidate.json', report)
     if not catalog['metadata']['complete'] or report['failures']:
-        raise RuntimeError('Candidate incomplete or count guard failed; existing published snapshot preserved. See .cache/calendar/quality-report.candidate.json')
+        raise RuntimeError('Candidate incomplete or count guard failed; existing published snapshot preserved. '
+                           f'See {directory / "quality-report.candidate.json"}')
     if accept:
-        write_json(prior_path, catalog)
-        write_json(OUT / 'quality-report.json', report)
-        write_json(OUT / 'manifest.json', manifest)
-        external = sum(r['status'] == 'external' for r in report['unresolvedReferences'])
-        unresolved = len(report['unresolvedReferences']) - external
-        prerequisite = report['ruleCoverage']['prerequisites']
-        markdown = f'''# UTM 当前快照数据质量报告
-
-学年：{manifest['academicYear']}。官方证据：{manifest['academicYearEvidence']['url']} 的页面标题 `{manifest['academicYearEvidence']['heading']}`。
-
-抓取完成：{manifest.get('finishedAt', manifest['startedAt'])}（UTC）；解析器：{PARSER_VERSION}。
-
-| 检查项 | 实际结果 |
-| --- | ---: |
-| Courses 目录分页 | {len(manifest['directories']['course']['pages'])} |
-| Programs 目录分页 | {len(manifest['directories']['program']['pages'])} |
-| 课程发现 / 成功详情 / 发布 | {len(manifest['directories']['course']['entities'])} / {len(catalog['courses'])} / {len(catalog['courses'])} |
-| 专业发现 / 成功详情 / 发布 | {len(manifest['directories']['program']['entities'])} / {len(catalog['programs'])} / {len(catalog['programs'])} |
-| 抓取或解析失败 | {len(report['failures'])} |
-| 重复目录身份 | {sum(len(d['duplicates']) for d in manifest['directories'].values())} |
-| 非空先修字段 | {prerequisite['nonempty']} |
-| 非空先修已结构化 | {prerequisite.get('nonemptyParsed', 0)} |
-| 先修含未知条件 | {prerequisite.get('unknown', 0)} |
-| 全字段及专业组含未知 / applicability | {len(report['unknownRules'])} |
-| 跨校区引用身份 | {external} |
-| 当前 UTM 目录外引用身份 | {unresolved} |
-| 先修引用图强连通分量 | {len(report['cycles'])} |
-
-实体覆盖完整不等于所有要求已机器理解。程序整体录取/毕业要求保守保留 unknown，条款组用于带来源的规划建议；年度 cutoff、cohort、stream、选修池分配、许可、高中课、复杂学分组合和其它未解析文字需要人工确认。简单 exclusion 列表是任一触发；含上下文例外的 exclusion 保留 unknown。
-
-环路是包含 OR 备选与 unknown 引用的投影结果，不代表必然无法完成的学习路径。外部/目录外引用保留完整代码和来源，未扩张为其他校区目录，也未自动当作等价课程。
-
-详单：`data/utm/manifest.json` 保留每页 URL、实际页码、课程/专业清单、哈希、抓取时间和每个详情状态；`data/utm/quality-report.json` 保留每项未知规则、未解析原因、跨校区/目录外引用、引用它们的实体、全部环路与手动更新差异。原始 HTML 只在本机 `.cache/calendar/`，不发布到浏览器。
-
-当前专业类型：{', '.join(f'{key} {value}' for key, value in sorted(report['programTypes'].items()))}。
-
-## 环路详单
-
-''' + '\n'.join('- ' + ', '.join(group) for group in report['cycles']) + '\n'
-        report_path = ROOT / 'data' / 'utm' / 'data-quality.md'
-        report_path.parent.mkdir(parents=True, exist_ok=True)
-        report_path.write_text(markdown, encoding='utf-8')
-    print(json.dumps({'accepted': accept, 'courses': len(catalog['courses']), 'programs': len(catalog['programs']),
-                      'unknownRequirements': len(report['unknownRules']), 'unresolvedReferences': len(report['unresolvedReferences']),
-                      'cycles': len(report['cycles']), 'ruleCoverage': report['ruleCoverage']}, ensure_ascii=False, indent=2), flush=True)
+        write_json(out_dir / 'catalog.json', catalog)
+        write_json(out_dir / 'quality-report.json', report)
+        write_json(out_dir / 'manifest.json', manifest)
+        write_text(out_dir / 'data-quality.md', quality_markdown(campus, manifest, catalog, report))
+    summary = {'campus': campus.id, 'accepted': accept, 'courses': len(catalog['courses']), 'programs': len(catalog['programs']),
+               'unknownRequirements': len(report['unknownRules']), 'unresolvedReferences': len(report['unresolvedReferences']),
+               'cycles': len(report['cycles']), 'ruleCoverage': report['ruleCoverage']}
+    print(json.dumps(summary, ensure_ascii=False, indent=2), flush=True)
     return catalog, report

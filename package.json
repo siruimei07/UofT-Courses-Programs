@@ -16,7 +16,7 @@
     "test:watch": "vitest",
     "test:e2e": "playwright test",
     "test:py": "python -m unittest discover -s tests -p \"test_*.py\"",
-    "data:collect": "python pipeline/collect_calendar.py",
+    "data:collect": "python -I pipeline",
     "data:build": "tsx scripts/build-frontend-data.ts",
     "data:validate": "tsx scripts/validate-catalog.ts",
     "check": "npm run lint && npm run typecheck && npm test && npm run data:validate && npm run build"

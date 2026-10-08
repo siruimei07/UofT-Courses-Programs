@@ -1,35 +1,38 @@
-# UTM 当前快照数据质量报告
+# UTM current snapshot: data quality report
 
-学年：2026-2027。官方证据：https://utm.calendar.utoronto.ca/ 的页面标题 `2026-2027 Calendar`。
+Academic year: 2026-2027. Evidence: the page heading `2026-2027 Calendar` at https://utm.calendar.utoronto.ca/.
 
-抓取完成：2026-10-08T04:33:00+00:00（UTC）；解析器：1.0.1。
+Collection finished: 2026-10-08T04:33:00+00:00 (UTC); parser 1.1.0.
 
-| 检查项 | 实际结果 |
+| Check | Result |
 | --- | ---: |
-| Courses 目录分页 | 84 |
-| Programs 目录分页 | 6 |
-| 课程发现 / 成功详情 / 发布 | 2491 / 2491 / 2491 |
-| 专业发现 / 成功详情 / 发布 | 168 / 168 / 168 |
-| 抓取或解析失败 | 0 |
-| 重复目录身份 | 0 |
-| 非空先修字段 | 2041 |
-| 非空先修已结构化 | 946 |
-| 先修含未知条件 | 1095 |
-| 全字段及专业组含未知 / applicability | 3794 |
-| 跨校区引用身份 | 1186 |
-| 当前 UTM 目录外引用身份 | 387 |
-| 先修引用图强连通分量 | 3 |
+| Course directory pages | 84 |
+| Program directory pages | 6 |
+| Courses discovered / detail ok / published | 2491 / 2491 / 2491 |
+| Programs discovered / detail ok / published | 168 / 168 / 168 |
+| Collection or parse failures | 0 |
+| Duplicate directory identities | 0 |
+| Non-empty prerequisite fields | 2041 |
+| Non-empty prerequisites fully structured | 955 |
+| Prerequisites with unknown clauses | 1086 |
+| Requirements (all fields and program groups) with unknown / applicability | 3792 |
+| Other-campus referenced ids | 1186 |
+| UTM ids not in the current calendar (never edges) | 387 |
+| Code typography repaired (glued / spaced / campus digit / suffix) | 2 / 2 / 6 / 4 |
+| Unrecognised code-like tokens / H-Y weight mismatches (reported only) | 3 / 156 |
+| "(formerly X)" aliases (reported, not substituted) | 11 |
+| Prerequisite reference cycles (SCCs) | 0 |
 
-实体覆盖完整不等于所有要求已机器理解。程序整体录取/毕业要求保守保留 unknown，条款组用于带来源的规划建议；年度 cutoff、cohort、stream、选修池分配、许可、高中课、复杂学分组合和其它未解析文字需要人工确认。简单 exclusion 列表是任一触发；含上下文例外的 exclusion 保留 unknown。
+Complete entity coverage does not mean every requirement is machine-understood. Whole program admission and completion rules stay `unknown` on purpose; requirement groups support sourced planning hints. Annual cutoffs, cohorts, streams, elective-pool allocation, permissions, high-school courses, complex credit combinations and other unparsed wording need manual confirmation. A simple exclusion list means any listed course triggers the exclusion; exclusions with contextual exceptions, or with "and" mixed into an "or" list, stay `unknown`.
 
-环路是包含 OR 备选与 unknown 引用的投影结果，不代表必然无法完成的学习路径。外部/目录外引用保留完整代码和来源，未扩张为其他校区目录，也未自动当作等价课程。
+Only `courseIds` are graph edges. Codes the text rules out ("except", "excluding", "no longer accepted"), advisory codes ("Highly Recommended", "Recommended Corequisite") and codes in conditional sentences ("Students seeking ...") are kept in `mentionedIds`; UTM codes absent from this calendar are kept in `unresolvedIds`. "(formerly X)" aliases are listed in the quality report and never substituted.
 
-详单：`public/data/manifest.json` 保留每页 URL、实际页码、课程/专业清单、哈希、抓取时间和每个详情状态；`public/data/quality-report.json` 保留每项未知规则、未解析原因、跨校区/目录外引用、引用它们的实体、全部环路与手动更新差异。原始 HTML 只在本机 `.cache/calendar/`，不发布到浏览器。
+Cycles are computed over all prerequisite references, including OR alternatives and unknown clauses; they do not imply an impossible study path. Other-campus and retired references keep their full code and source; they are never expanded into other catalogs or treated as equivalent courses.
 
-当前专业类型：Certificate 11, Focus 2, Major 46, Minor 52, Specialist 57。
+Details: `data/utm/manifest.json` keeps every directory URL, page number, entity list, hash, fetch time and detail status; `data/utm/quality-report.json` keeps every unknown rule with its reason, cross-campus and retired references with the entities citing them, code repairs, aliases, all cycles and the snapshot diff. Raw HTML stays in the local `.cache/calendar/` cache and is never published to the browser.
 
-## 环路详单
+Program types: Certificate 11, Focus 2, Major 46, Minor 52, Specialist 57.
 
-- UTM:FSC307H5
-- UTM:FSC407H5
-- UTM:LIN104H5, UTM:LIN105H5
+## Cycles
+
+- none
