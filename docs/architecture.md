@@ -67,7 +67,9 @@ geometry** (recomputed whenever node display states change).
 - Band: 000/100 → band 0, 200 → 1, 300 → 2, 400 → 3, always the course's own level.
 - Column: `col(c) = max(bandStart[band(c)], max(col(p) + 1))`; bands are contiguous, each band's
   width is its deepest internal chain + 1. Hence `col(p) < col(c)` for every layout edge.
-- Lane: one per subject, ordered by division then subject code; lanes carry name/department.
+- Lane: one per subject, ordered by division (Sciences, Social Sciences, Management &
+  Professional, Humanities, Interdisciplinary — the order of `subjects.json` `divisions`) then
+  subject code; lanes carry name/department.
 - Cell order (lane × column): barycentre of predecessors (roots use their successors), ties by
   code. Static, so nodes never reshuffle when highlighting changes.
 
@@ -92,7 +94,9 @@ interpolation between geometries (enabled in the motion phase). React owns the U
 
 - Selection, program, filters, viewport, theme, language: app store (`src/app/`).
 - Student record: `localStorage` key `uoft-course-map:profile:v1` (course id → completed /
-  in progress / planned, optional grade). Never uploaded, never put into URLs.
+  in progress / planned, optional grade). Never uploaded, never put into URLs. Preferences live
+  under `uoft-course-map:prefs:v1`.
+- Visual design: `docs/design-spec.md` (tokens, geometry constants, interaction, motion).
 - Shareable URL hash: campus, selected course, selected program only.
 
 ## Multi-campus

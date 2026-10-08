@@ -133,6 +133,13 @@ export interface PresentationInput {
   programIds: ReadonlySet<string> | null
   record: ReadonlyMap<string, RecordStatus>
   eligibility: ReadonlyMap<string, Eligibility> | null
+  /**
+   * Labels of transitive chain nodes: 'all' = full (code + title), 'direct' = compact (code only).
+   * Resolved by the app ("chain titles: auto", design-spec 8.2); the Titles toggle forces 'all'.
+   */
+  chainTitles: 'all' | 'direct'
+  /** Titles toggle: overview nodes are `full` instead of `compact`. */
+  titles: boolean
 }
 
 // ---------------------------------------------------------------------------
@@ -141,25 +148,54 @@ export interface PresentationInput {
 export interface GeometryOptions {
   laneHeaderWidth: number
   bandHeaderHeight: number
+  /** Top and bottom padding inside a labelled lane. */
   lanePaddingY: number
   laneMinHeight: number
-  /** Lane height when every node in it is hidden (0 removes the lane). */
+  /** Extra minimum height of the first lane of a division (division label). */
+  divisionLabelHeight: number
+  /** Lane whose visible nodes are all `mini` while dimming is active. */
+  laneSlimHeight: number
+  /** Lane whose nodes are all hidden (0 removes the lane). */
   laneCollapsedHeight: number
+  bandPadLeft: number
+  /** Replaces the last visible column's trailing gap inside a band. */
+  bandPadRight: number
+  /** Label end → next column's left edge. */
   columnGap: number
+  /** Gap after a mini-only column. */
+  miniColumnGap: number
+  /** Maximum track width per class; measured label widths shrink tracks below this. */
   colWidth: Record<Exclude<DisplayClass, 'hidden'>, number>
   rowHeight: Record<Exclude<DisplayClass, 'hidden'>, number>
-  /** Horizontal grid pitch for packed mini dots (vertical pitch is rowHeight.mini). */
+  /** Row height of the focus node (plate); grows with wrapped title lines. */
+  focusRowHeight: number
+  /** Horizontal and vertical pitch of packed mini dots. */
   miniPitch: number
+  /** Gap between the last labelled row and the mini grid of a cell. */
+  miniGapAbove: number
+  miniPerRowMax: number
   /**
-   * A cell taller than this wraps into extra side-by-side tracks inside its column. Nodes of
-   * one column never share an edge, so tracks keep the left-to-right rule intact.
+   * A cell whose labelled stack is taller than this wraps into balanced, top-aligned tracks inside
+   * its column (column-major). Nodes of one column never share an edge, so tracks keep the
+   * left-to-right rule intact.
    */
-  cellMaxHeight: number
-  /** Horizontal gap between tracks of one cell. */
+  cellMaxHeight: { full: number; compact: number }
+  /** Gap between wrapped tracks of one column (kept < columnGap / 3). */
   trackGap: number
-  /** Horizontal inset of the dot inside its column. */
+  /** Dot centre from the column's (track's) left edge. */
   dotInset: number
+  /** Label start from the column's (track's) left edge. */
+  labelX: number
+  /** Maximum measured title or code width of a full label. */
+  fullLabelMax: number
 }
+
+/**
+ * Measured label width in world px (design-spec 8.1): compact = code width; full =
+ * max(code, truncated title); focus = max(code + credit, wrapped title) + 6. Supplied by the
+ * renderer's text module so geometry stays pure.
+ */
+export type LabelMeasure = (index: number, cls: Exclude<DisplayClass, 'hidden' | 'mini'>, isFocus: boolean) => number
 
 export interface NodeBox {
   /** Label box (world units). */
@@ -171,17 +207,27 @@ export interface NodeBox {
   cx: number
   cy: number
   cls: DisplayClass
+  /** Track index inside its cell (0 when the cell does not wrap). */
+  track: number
+  /** Mini dot that does not fit a slim lane's single row: not drawn, not hit-testable. */
+  overflow: boolean
 }
 
 export interface ColumnBox {
   x: number
   w: number
+  /** Number of wrapped tracks (1 = no wrap) and the width of one track. */
+  tracks: number
+  trackW: number
+  kind: 'labelled' | 'mini' | 'empty'
 }
 
 export interface LaneBox {
   y: number
   h: number
   collapsed: boolean
+  /** Dimming is active and every visible node of the lane is `mini`. */
+  slim: boolean
 }
 
 export interface BandBox {
@@ -198,4 +244,35 @@ export interface Geometry {
   /** Full world size including lane header column and band header row. */
   width: number
   height: number
+}
+
+// ---------------------------------------------------------------------------
+// Routes: highlighted edges after corridor routing and fan bundling (routes.ts, design-spec 8.8-8.9).
+
+export type PathSegment =
+  | { op: 'M' | 'L'; x: number; y: number }
+  | { op: 'C'; x1: number; y1: number; x2: number; y2: number; x: number; y: number }
+
+export interface RoutedPath {
+  /** Index into Topology.edges, or -1 for a bundle trunk. */
+  edge: number
+  role: EdgeRole
+  kind: EdgeKind
+  /** 'trunk' and 'branch' come from fan bundling; 'fork' marks an "any of" junction stub. */
+  shape: 'edge' | 'trunk' | 'branch' | 'fork'
+  segments: PathSegment[]
+}
+
+export interface RouteInput {
+  /**
+   * Groups of the focus's direct prerequisites (node indices) that form one parsed `any` rule;
+   * they are drawn through a fork junction. Empty when the rule is unknown or has no `any`.
+   */
+  anyGroups: number[][]
+}
+
+export interface Routes {
+  paths: RoutedPath[]
+  /** Highlighted edges that could not avoid an obstacle and were drawn as plain curves. */
+  fallbacks: number
 }

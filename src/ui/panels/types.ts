@@ -17,6 +17,9 @@ export interface PanelProps {
 }
 
 // Components exported by the panels module (one file each):
+//   RightPanel(props: PanelProps)    host mounted by the shell: tabs Course / Program / My courses
+//                                    (state.panel), collapsible to a 48 px rail
+//                                    (state.panelCollapsed); renders the three panels below
 //   CoursePanel(props: PanelProps)   details of state.focusId: credits, level, distribution,
 //                                    description (lazy details.json), requirement trees with
 //                                    met/unmet/unknown for the student record, exclusions,

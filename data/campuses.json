@@ -12,7 +12,15 @@
       "programSearchUrl": "https://utm.calendar.utoronto.ca/program-search",
       "coursePageTemplate": "https://utm.calendar.utoronto.ca/course/{slug}",
       "programPageTemplate": "https://utm.calendar.utoronto.ca/program/{slug}",
-      "campusDigit": "5"
+      "campusDigit": "5",
+      "startSubjects": [
+        "CSC",
+        "MAT",
+        "STA",
+        "ECO",
+        "PSY",
+        "BIO"
+      ]
     },
     {
       "id": "UTSG",
@@ -25,7 +33,15 @@
       "programSearchUrl": "https://artsci.calendar.utoronto.ca/search-programs",
       "coursePageTemplate": "https://artsci.calendar.utoronto.ca/course/{slug}",
       "programPageTemplate": "https://artsci.calendar.utoronto.ca/program/{slug}",
-      "campusDigit": "1"
+      "campusDigit": "1",
+      "startSubjects": [
+        "CSC",
+        "MAT",
+        "STA",
+        "ECO",
+        "PSY",
+        "BIO"
+      ]
     }
   ]
 }

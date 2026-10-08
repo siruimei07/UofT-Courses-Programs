@@ -1,10 +1,12 @@
 // localStorage persistence for preferences and the student record. Storage can be missing or
 // throw (private mode, blocked site data); the app must work without it.
 import type { RecordStatus } from '../graph/types'
-import { appStore, type AppState, type Depth, type Lang, type RecordEntry, type ThemePref } from './store'
+import { appStore, type AppState, type Depth, type HomePref, type Lang, type RecordEntry, type ThemePref } from './store'
 
 export const PREFS_KEY = 'uoft-course-map:prefs:v1'
-export const RECORD_KEY = 'uoft-course-map:record:v1'
+export const RECORD_KEY = 'uoft-course-map:profile:v1'
+/** Key used by early development builds; migrated once into RECORD_KEY. */
+const LEGACY_RECORD_KEY = 'uoft-course-map:record:v1'
 
 const STATUSES: readonly RecordStatus[] = ['completed', 'inProgress', 'planned']
 const COURSE_ID = /^(UTM|UTSG|UTSC):[A-Z0-9]{6,10}$/
@@ -16,7 +18,13 @@ interface StoredPrefs {
   hideUnrelated?: boolean
   hideCompleted?: boolean
   showAllEdges?: boolean
+  titles?: boolean
+  panelCollapsed?: boolean
+  home?: HomePref | null
+  onboarded?: boolean
 }
+
+const BOOLEAN_PREFS = ['hideUnrelated', 'hideCompleted', 'showAllEdges', 'titles', 'panelCollapsed', 'onboarded'] as const
 
 export interface StoredRecord {
   schemaVersion: 1
@@ -40,6 +48,22 @@ function write(key: string, value: unknown): void {
   }
 }
 
+function remove(key: string): void {
+  try {
+    window.localStorage.removeItem(key)
+  } catch {
+    // Ignore: nothing to clean up without storage.
+  }
+}
+
+function prefsOf(state: AppState): StoredPrefs {
+  return {
+    theme: state.theme, lang: state.lang, depth: state.depth,
+    hideUnrelated: state.hideUnrelated, hideCompleted: state.hideCompleted, showAllEdges: state.showAllEdges,
+    titles: state.titles, panelCollapsed: state.panelCollapsed, home: state.home, onboarded: state.onboarded,
+  }
+}
+
 function pickEnum<T extends string>(value: unknown, allowed: readonly T[]): T | undefined {
   return allowed.includes(value as T) ? (value as T) : undefined
 }
@@ -54,8 +78,12 @@ export function parsePrefs(value: unknown): Partial<AppState> {
   if (theme) result.theme = theme
   if (lang) result.lang = lang
   if (depth) result.depth = depth
-  for (const key of ['hideUnrelated', 'hideCompleted', 'showAllEdges'] as const) {
+  for (const key of BOOLEAN_PREFS) {
     if (typeof prefs[key] === 'boolean') result[key] = prefs[key]
+  }
+  const home = prefs.home
+  if (home && (home.kind === 'subject' || home.kind === 'program') && typeof home.id === 'string' && /^[A-Z0-9:_-]{2,40}$/i.test(home.id)) {
+    result.home = { kind: home.kind, id: home.id }
   }
   return result
 }
@@ -92,7 +120,14 @@ export function serializeRecord(record: ReadonlyMap<string, RecordEntry>): Store
 /** Loads stored state into the store and keeps storage in sync afterwards. */
 export function startPersistence(): () => void {
   const patch: Partial<AppState> = parsePrefs(read(PREFS_KEY))
-  const storedRecord = read(RECORD_KEY)
+  let storedRecord = read(RECORD_KEY)
+  if (!storedRecord) {
+    storedRecord = read(LEGACY_RECORD_KEY)
+    if (storedRecord) {
+      write(RECORD_KEY, storedRecord)
+      remove(LEGACY_RECORD_KEY)
+    }
+  }
   if (storedRecord) {
     try {
       patch.record = parseRecord(storedRecord)
@@ -103,19 +138,14 @@ export function startPersistence(): () => void {
   appStore.set(patch)
 
   let last = appStore.get()
+  let lastPrefs = JSON.stringify(prefsOf(last))
   return appStore.subscribe(() => {
     const state = appStore.get()
     if (state.record !== last.record) write(RECORD_KEY, serializeRecord(state.record))
-    if (
-      state.theme !== last.theme || state.lang !== last.lang || state.depth !== last.depth ||
-      state.hideUnrelated !== last.hideUnrelated || state.hideCompleted !== last.hideCompleted ||
-      state.showAllEdges !== last.showAllEdges
-    ) {
-      const prefs: StoredPrefs = {
-        theme: state.theme, lang: state.lang, depth: state.depth,
-        hideUnrelated: state.hideUnrelated, hideCompleted: state.hideCompleted, showAllEdges: state.showAllEdges,
-      }
-      write(PREFS_KEY, prefs)
+    const prefs = JSON.stringify(prefsOf(state))
+    if (prefs !== lastPrefs) {
+      write(PREFS_KEY, prefsOf(state))
+      lastPrefs = prefs
     }
     last = state
   })

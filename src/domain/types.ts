@@ -19,6 +19,8 @@ export interface Requirement {
   courseIds: string[]
   /** Codes mentioned but ruled out, advisory or conditional ("except ENG100H5"); never edges. */
   mentionedIds?: string[]
+  /** Same-campus codes cited but absent from this calendar (retired / misprinted); never edges. */
+  unresolvedIds?: string[]
 }
 export interface Course {
   id: string

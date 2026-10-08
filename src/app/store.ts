@@ -10,6 +10,12 @@ export type Lang = 'en' | 'zh'
 export type Depth = 'all' | 'direct'
 export type PanelId = 'course' | 'program' | 'record' | null
 
+/** Where a returning visitor lands when the URL names no course or program. */
+export interface HomePref {
+  kind: 'subject' | 'program'
+  id: string
+}
+
 export interface RecordEntry {
   status: RecordStatus
   /** Final percentage grade, when the student chose to enter it. */
@@ -24,6 +30,8 @@ export interface AppState {
   hideUnrelated: boolean
   hideCompleted: boolean
   showAllEdges: boolean
+  /** Titles toggle: overview nodes show titles; chain titles always 'all'. */
+  titles: boolean
   /** Visible levels; null = all. */
   levels: ReadonlySet<number> | null
   /** Visible subjects; null = all. */
@@ -33,6 +41,11 @@ export interface AppState {
   theme: ThemePref
   lang: Lang
   panel: PanelId
+  /** Right panel collapsed to its rail. */
+  panelCollapsed: boolean
+  home: HomePref | null
+  /** First-visit start strip dismissed. */
+  onboarded: boolean
 }
 
 type Listener = () => void
@@ -72,12 +85,16 @@ export function initialAppState(): AppState {
     hideUnrelated: false,
     hideCompleted: false,
     showAllEdges: false,
+    titles: false,
     levels: null,
     subjects: null,
     record: new Map(),
     theme: 'system',
     lang: 'en',
     panel: null,
+    panelCollapsed: false,
+    home: null,
+    onboarded: false,
   }
 }
 
@@ -103,7 +120,7 @@ export const actions = {
   setDepth(depth: Depth) {
     appStore.set({ depth })
   },
-  toggle(key: 'hideUnrelated' | 'hideCompleted' | 'showAllEdges') {
+  toggle(key: 'hideUnrelated' | 'hideCompleted' | 'showAllEdges' | 'titles' | 'panelCollapsed') {
     appStore.set(state => ({ [key]: !state[key] }))
   },
   setLevels(levels: ReadonlySet<number> | null) {
@@ -128,6 +145,12 @@ export const actions = {
   },
   setLang(lang: Lang) {
     appStore.set({ lang })
+  },
+  setHome(home: HomePref | null) {
+    appStore.set({ home })
+  },
+  setOnboarded() {
+    appStore.set({ onboarded: true })
   },
   clearFocus() {
     appStore.set(state => ({ focusId: null, panel: state.panel === 'course' ? null : state.panel }))

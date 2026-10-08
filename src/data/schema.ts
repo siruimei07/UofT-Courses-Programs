@@ -16,6 +16,8 @@ export interface CampusEntry {
   academicYear?: string
   courseCount?: number
   programCount?: number
+  /** Subjects shown first on a first visit (UTM: CSC, MAT, STA, ECO, PSY, BIO). */
+  startSubjects?: string[]
 }
 
 export interface CampusRegistry {
@@ -46,6 +48,8 @@ export interface RequirementLite {
   ids: string[]
   /** Codes mentioned but ruled out / advisory / conditional; shown in details, never edges. */
   mentioned?: string[]
+  /** Same-campus codes that are not in this calendar (retired or misprinted); never edges or counts. */
+  unresolved?: string[]
 }
 
 export interface GraphCourse {
