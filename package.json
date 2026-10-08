@@ -1,29 +1,27 @@
 {
-  "name": "utm-course-atlas",
+  "name": "uoft-course-map",
   "private": true,
-  "version": "1.0.0",
+  "version": "0.1.0",
   "type": "module",
   "engines": {
     "node": ">=22.12.0"
   },
   "scripts": {
     "dev": "vite --host 127.0.0.1",
-    "build": "tsc -b && vite build",
+    "build": "tsc --noEmit && vite build",
     "preview": "vite preview --host 127.0.0.1",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src tests scripts --no-warn-ignored",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:e2e": "playwright test",
-    "data:collect": "python scripts/collect_calendar.py",
+    "test:py": "python -m unittest discover -s tests -p \"test_*.py\"",
+    "data:collect": "python pipeline/collect_calendar.py",
+    "data:build": "tsx scripts/build-frontend-data.ts",
     "data:validate": "tsx scripts/validate-catalog.ts",
-    "check": "npm run lint && npm run typecheck && npm test && npm run data:validate && npm run build",
-    "benchmark": "tsx scripts/benchmark.ts"
+    "check": "npm run lint && npm run typecheck && npm test && npm run data:validate && npm run build"
   },
   "dependencies": {
-    "@xyflow/react": "12.12.0",
-    "elkjs": "0.12.0",
-    "lucide-react": "1.52.0",
     "react": "19.3.0",
     "react-dom": "19.3.0"
   },

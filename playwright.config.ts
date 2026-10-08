@@ -10,7 +10,7 @@ export default defineConfig({
   workers: 1,
   reporter: 'list',
   use: {
-    baseURL: 'http://127.0.0.1:4173/utm-atlas-test/',
+    baseURL: 'http://127.0.0.1:4173/UofT-Courses-Programs/',
     trace: 'retain-on-failure',
     screenshot: 'only-on-failure',
     ...devices['Desktop Chrome'],
@@ -18,7 +18,7 @@ export default defineConfig({
   },
   webServer: {
     command: 'node scripts/serve-e2e.mjs',
-    url: 'http://127.0.0.1:4173/utm-atlas-test/',
+    url: 'http://127.0.0.1:4173/UofT-Courses-Programs/',
     reuseExistingServer: !process.env.CI,
     timeout: 120_000,
   },
