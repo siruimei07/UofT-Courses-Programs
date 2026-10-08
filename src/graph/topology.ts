@@ -1,5 +1,6 @@
 // Static layout skeleton, computed once per dataset: layout edges, bands, columns, lanes, cell order.
 import type { GraphCourse, GraphDataset } from '../data/schema'
+import { laneDivision } from './tokens'
 import type { Band, EdgeKind, ExcludedEdge, Lane, LayoutEdge, TopoNode, Topology } from './types'
 
 /** 100/200/300/400 bands always exist so headers stay stable even when a level is empty. */
@@ -59,6 +60,29 @@ export function buildTopology(dataset: GraphDataset): Topology {
   }))
 
   return { nodes, indexById, edges, excludedEdges, preds, succs, lanes, bands, columnCount, cells }
+}
+
+const tones = new WeakMap<Topology, ReadonlyArray<1 | 2>>()
+
+/**
+ * Lane tone (design-spec 7.7, owner decision 19.8): tones alternate 1, 2, 1, ... within each
+ * division's colour family in static lane order, so a subject keeps its tone under every filter.
+ * Divisions without their own family (unknown ids, no division) count as interdisciplinary, the
+ * same mapping `laneToneVar` uses for the colour itself.
+ */
+export function laneTone(topology: Topology, laneIndex: number): 1 | 2 {
+  let list = tones.get(topology)
+  if (!list) {
+    const seen = new Map<string, number>()
+    list = topology.lanes.map(lane => {
+      const family = laneDivision(lane.division)
+      const k = seen.get(family) ?? 0
+      seen.set(family, k + 1)
+      return k % 2 === 0 ? 1 : 2
+    })
+    tones.set(topology, list)
+  }
+  return list[laneIndex] ?? 1
 }
 
 const compareText = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0)

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
-  buildTopology, COMPACT_LABEL_HALF, computeGeometry, computePresentation, DEFAULT_GEOMETRY_OPTIONS, FULL_LABEL_HALF, LABEL_PAD,
+  buildTopology, COMPACT_LABEL_HALF, computeGeometry, computePresentation, DEFAULT_GEOMETRY_OPTIONS, FULL_LABEL_HALF, geometryOptions, LABEL_PAD,
 } from '../src/graph'
 import type { DisplayClass, Geometry, GeometryOptions, LabelMeasure, NodeRole, Presentation, PresentationInput, Topology } from '../src/graph'
 import { loadGraphDataset, presentationInput, syntheticDataset } from './helpers/dataset'
@@ -87,14 +87,19 @@ function geometryProblems(topo: Topology, p: Presentation, g: Geometry, measureF
     check(box.x + box.w <= column.x + column.w + 1e-6, () => `${where()} leaves its column`)
   }
 
-  // Lanes: contiguous, slim / collapsed / labelled heights (8.4, 8.5).
+  // Lanes: contiguous, slim / collapsed / labelled heights (8.4, 8.5). The division label (and its
+  // extra height) belongs to the first lane of each division that is neither collapsed nor slim.
   let y = options.bandHeaderHeight
+  const labelledDivisions = new Set<string>()
   topo.lanes.forEach((lane, l) => {
     const box = g.lanes[l]
     const where = () => `lane ${lane.subject} ${JSON.stringify(box)}`
     check(close(box.y, y), () => `${where()} expected y=${y}`)
     const visible = lane.nodes.filter(v => p.cls[v] !== 'hidden')
     const labelled = visible.filter(v => isLabelled(p.cls[v]))
+    const carriesLabel = !box.collapsed && !box.slim && !labelledDivisions.has(lane.division)
+    if (carriesLabel) labelledDivisions.add(lane.division)
+    check(box.divisionLabel === carriesLabel, () => `${where()} divisionLabel should be ${carriesLabel}`)
     if (!visible.length) {
       check(box.collapsed && !box.slim && box.h === options.laneCollapsedHeight, where)
     } else if (p.dimming && !labelled.length) {
@@ -125,8 +130,7 @@ function geometryProblems(topo: Topology, p: Presentation, g: Geometry, measureF
         }
         content = Math.max(content, bottom - top)
       }
-      const first = l === 0 || topo.lanes[l - 1].division !== lane.division
-      const minimum = options.laneMinHeight + (first ? options.divisionLabelHeight : 0)
+      const minimum = options.laneMinHeight + (carriesLabel ? options.divisionLabelHeight : 0)
       check(close(box.h, Math.max(minimum, 2 * options.lanePaddingY + content)), () => `${where()} expected h=${Math.max(minimum, 2 * options.lanePaddingY + content)}`)
     }
     y = box.y + box.h
@@ -181,7 +185,9 @@ describe('geometry on the real UTM dataset', () => {
   })
 
   it('wraps tall cells into balanced, top-aligned, column-major tracks on one row grid', () => {
-    expect(opt.trackGap).toBeLessThan(opt.columnGap / 3)
+    // 8 px against the tuned 24 px column gap (8.1 tuning step 1): a label end is 24 px from the next
+    // track's dot and 32 px from the next column's.
+    expect(opt.trackGap).toBeLessThanOrEqual(opt.columnGap / 3)
     let wrappedCells = 0
     for (const input of [presentationInput(), presentationInput({ titles: true }), presentationInput({ focusId: 'UTM:SOC221H5' })]) {
       const { presentation, geometry } = layout(input)
@@ -309,11 +315,12 @@ describe('geometry rules on synthetic layouts', () => {
     const g = computeGeometry(topo, p, stubMeasure(topo))
     const compactW = opt.labelX + CODE + 8
     const fullW = opt.labelX + TITLE + 8
-    const c0 = 176 + 14
-    const c1 = c0 + compactW + 20
-    const band0End = c1 + compactW + 10
-    const c3 = band0End + 14
-    const band1End = c3 + fullW + 10
+    const gap = opt.columnGap - LABEL_PAD
+    const c0 = 176 + opt.bandPadLeft
+    const c1 = c0 + compactW + gap
+    const band0End = c1 + compactW + opt.bandPadRight
+    const c3 = band0End + opt.bandPadLeft
+    const band1End = c3 + fullW + opt.bandPadRight
     const expected: Array<[number, number, string]> = [
       [c0, compactW, 'labelled'], [c1, compactW, 'labelled'], [c1 + compactW, 0, 'empty'],
       [c3, fullW, 'labelled'], [band1End, 0, 'empty'], [band1End, 0, 'empty'],
@@ -330,7 +337,7 @@ describe('geometry rules on synthetic layouts', () => {
     expect(g.bands.slice(2).map(band => [band.w, band.visible])).toEqual([[0, false], [0, false]])
     expect(g.width).toBeCloseTo(band1End, 6)
     // One lane, first of its division: min height 64 + 17; the tallest cell is a 40 px full row.
-    expect(g.lanes).toEqual([{ y: 60, h: 81, collapsed: false, slim: false }])
+    expect(g.lanes).toEqual([{ y: 60, h: 81, collapsed: false, slim: false, divisionLabel: true }])
     const top = 60 + 12
     const compact = g.nodes[at(topo, 'AAA101H5')]
     expect(compact).toMatchObject({ x: c0 + 20, y: top + 11 - 8, h: 16, cx: c0 + 8, cy: top + 11, cls: 'compact', track: 0, overflow: false })
@@ -372,7 +379,7 @@ describe('geometry rules on synthetic layouts', () => {
     const c1 = g.columns[1]
     expect(c0).toMatchObject({ kind: 'labelled', tracks: 1 })
     expect(c1).toMatchObject({ kind: 'mini', w: 22, trackW: 22, tracks: 1 })
-    expect(c1.x).toBeCloseTo(c0.x + c0.w + 20, 6)
+    expect(c1.x).toBeCloseTo(c0.x + c0.w + opt.columnGap - LABEL_PAD, 6)
     const top = 60 + 12
     // AAA: full row (40), 6 px gap, then 12 minis in rows of 10.
     const grid = topo.cells[0][0].filter(v => p.cls[v] === 'mini')
@@ -383,9 +390,9 @@ describe('geometry rules on synthetic layouts', () => {
     })
     expect(g.nodes[at(topo, 'AAA150H5')]).toMatchObject({ cy: top + 4, overflow: false })
     expect(g.nodes[at(topo, 'AAA150H5')].cx).toBeCloseTo(c1.x + 8, 6)
-    expect(g.lanes[0]).toEqual({ y: 60, h: Math.max(81, 24 + 40 + 6 + 16), collapsed: false, slim: false })
+    expect(g.lanes[0]).toEqual({ y: 60, h: Math.max(81, 24 + 40 + 6 + 16), collapsed: false, slim: false, divisionLabel: true })
     // BBB has only minis while dimming: a 30 px slim row; the mini column fits two dots, the rest overflow.
-    expect(g.lanes[1]).toEqual({ y: 60 + 86, h: 30, collapsed: false, slim: true })
+    expect(g.lanes[1]).toEqual({ y: 60 + 86, h: 30, collapsed: false, slim: true, divisionLabel: false })
     const slimRow = ['BBB111H5', 'BBB112H5', 'BBB113H5', 'BBB114H5'].map(code => g.nodes[at(topo, code)])
     expect(slimRow.map(box => box.overflow)).toEqual([false, false, true, true])
     expect(slimRow.every(box => box.cy === 60 + 86 + 15)).toBe(true)
@@ -434,18 +441,98 @@ describe('geometry rules on synthetic layouts', () => {
     const options = { laneCollapsedHeight: 6, columnGap: 20, laneMinHeight: 50, divisionLabelHeight: undefined }
     const g = computeGeometry(topo, p, stubMeasure(topo), options)
     expect(g.lanes).toEqual([
-      { y: 60, h: 67, collapsed: false, slim: false },
-      { y: 127, h: 6, collapsed: true, slim: false },
-      { y: 133, h: 67, collapsed: false, slim: false },
-      { y: 200, h: 50, collapsed: false, slim: false },
+      { y: 60, h: 67, collapsed: false, slim: false, divisionLabel: true },
+      { y: 127, h: 6, collapsed: true, slim: false, divisionLabel: false },
+      { y: 133, h: 67, collapsed: false, slim: false, divisionLabel: true },
+      { y: 200, h: 50, collapsed: false, slim: false, divisionLabel: false },
     ])
     expect(g.height).toBe(250)
-    expect(geometryProblems(topo, p, g, stubMeasure(topo), { ...opt, laneCollapsedHeight: 6, columnGap: 20, laneMinHeight: 50 })).toEqual([])
+    const custom = { ...opt, laneCollapsedHeight: 6, columnGap: 20, laneMinHeight: 50 }
+    expect(geometryProblems(topo, p, g, stubMeasure(topo), custom)).toEqual([])
+    // The geometry carries the options it was laid out with (routes read them back).
+    expect(geometryOptions(g)).toEqual(custom)
+    expect(geometryOptions({ ...g, options: undefined } as unknown as typeof g)).toBe(DEFAULT_GEOMETRY_OPTIONS)
+  })
+
+  it('moves the division label past collapsed and slim lanes: the first lane that is neither carries it (and its height)', () => {
+    const topo = buildTopology(syntheticDataset(
+      [{ code: 'AAA101H5' }, { code: 'BBB101H5' }, { code: 'CCC101H5' }, { code: 'DDD101H5' }, { code: 'EEE101H5' }],
+      [
+        { code: 'AAA', division: 'sci' }, { code: 'BBB', division: 'sci' }, { code: 'CCC', division: 'sci' },
+        { code: 'DDD', division: 'hum' }, { code: 'EEE', division: 'hum' },
+      ],
+      [{ id: 'sci', label: 'Sciences' }, { id: 'hum', label: 'Humanities' }],
+    ))
+    // Dimming: AAA hidden (collapsed), BBB only a mini (slim), CCC labelled; DDD slim, EEE labelled.
+    const p = fake(topo, { BBB101H5: 'mini', CCC101H5: 'full', DDD101H5: 'mini', EEE101H5: 'compact' }, {}, true)
+    const g = computeGeometry(topo, p, stubMeasure(topo))
+    expect(g.lanes.map(lane => [lane.collapsed, lane.slim, lane.divisionLabel])).toEqual([
+      [true, false, false], [false, true, false], [false, false, true], [false, true, false], [false, false, true],
+    ])
+    expect(g.lanes.map(lane => lane.h)).toEqual([0, 30, 64 + 17, 30, 64 + 17])
+    expect(geometryProblems(topo, p, g, stubMeasure(topo))).toEqual([])
+    // No dimming: the first lanes carry the labels again.
+    const overview = computeGeometry(topo, fake(topo, { AAA101H5: 'compact', BBB101H5: 'compact', CCC101H5: 'compact', DDD101H5: 'compact', EEE101H5: 'compact' }), stubMeasure(topo))
+    expect(overview.lanes.map(lane => lane.divisionLabel)).toEqual([true, false, false, true, false])
   })
 
   it('rejects a presentation that does not match the topology', () => {
     const topo = buildTopology(syntheticDataset([{ code: 'AAA101H5' }]))
     const p = fake(topo, { AAA101H5: 'compact' })
     expect(() => computeGeometry(topo, { ...p, cls: [] }, stubMeasure(topo))).toThrow()
+  })
+})
+
+// ---------------------------------------------------------------------------
+
+describe('framing fit at the auto-frame floor (design-spec 8.1 tuning order, 10.2 table)', () => {
+  // Plot widths with the panel open (6.1) minus the 16 px framing margins (10.2), at zoom 0.92.
+  const FLOOR = 0.92
+  const WIDE = 1318 - 32
+  const STANDARD = 994 - 32
+  /** Width of the 8.12 box (dot, label or plate of each kept chain node, plus 12 px a side). */
+  const boxWidth = (p: Presentation, g: Geometry, keep: (role: NodeRole) => boolean) => {
+    let left = Infinity
+    let right = -Infinity
+    p.role.forEach((role, v) => {
+      if (role === 'none' || role === 'program' || p.cls[v] === 'hidden' || !keep(role)) return
+      const box = g.nodes[v]
+      const r = role === 'focus' ? 10.5 : 8.5
+      left = Math.min(left, box.x, box.cx - r)
+      right = Math.max(right, box.x + box.w, box.cx + r)
+    })
+    return right - left + 24
+  }
+  const chain = (code: string, options: Partial<GeometryOptions> = {}, fullLabelMax = opt.fullLabelMax) => {
+    const presentation = computePresentation(topology, presentationInput({ focusId: `UTM:${code}`, chainTitles: 'direct' }))
+    const focus = presentation.role.indexOf('focus')
+    const geometry = computeGeometry(topology, presentation, stubMeasure(topology, fullLabelMax), { ...options, focusLines: stubFocusLines(topology, focus) })
+    return {
+      full: boxWidth(presentation, geometry, () => true),
+      window1: boxWidth(presentation, geometry, role => role !== 'unlock'),
+      window2: boxWidth(presentation, geometry, role => role === 'focus' || role === 'prereq-direct' || role === 'unlock-direct'),
+      prerequisites: boxWidth(presentation, geometry, role => role === 'focus' || role === 'prereq' || role === 'prereq-direct'),
+    }
+  }
+
+  it('applies every tuning step and records the frames that still fall back to priority windows (known limits)', () => {
+    expect(opt).toMatchObject({ columnGap: 24, bandPadLeft: 10, bandPadRight: 8, fullLabelMax: 172 })
+    const before = chain('CSC148H5', { columnGap: 28, bandPadLeft: 14, bandPadRight: 10, fullLabelMax: 184 }, 184)
+    const csc = chain('CSC148H5')
+    const mat = chain('MAT232H5')
+    console.log(`[graph] fit at 0.92: CSC148H5 chain ${before.full.toFixed(0)} → ${csc.full.toFixed(0)} px (needs ≤ ${(WIDE / FLOOR).toFixed(0)}), `
+      + `window 1/2 ${csc.window1.toFixed(0)} / ${csc.window2.toFixed(0)} px (1536 needs ≤ ${(STANDARD / FLOOR).toFixed(0)}); MAT232H5 prerequisites ${mat.prerequisites.toFixed(0)} px`)
+    // The tuning narrows the chain, but at 1920 × 1080 it still overshoots by about 2 % (real
+    // Segoe UI in Chromium: 1426 px against 1398), so 10.2 step 4 applies there: window 1 (focus,
+    // every prerequisite, direct unlocks) fits, and a pill counts the later unlocks.
+    expect(csc.full).toBeLessThan(before.full - 60)
+    expect(csc.full * FLOOR).toBeGreaterThan(WIDE)
+    expect(csc.full * FLOOR).toBeLessThan(WIDE * 1.05)
+    expect(csc.window1 * FLOOR).toBeLessThanOrEqual(WIDE)
+    // At 1536 × 864 even window 2 (focus, direct prerequisites, direct unlocks) is too wide (real
+    // Segoe UI: 1062 px against 1046): the frame centres the focus and pills show the rest.
+    expect(csc.window2 * FLOOR).toBeGreaterThan(STANDARD)
+    // MAT232H5: every prerequisite (MAT102H5 and MAT157H5 at the far left included) fits both frames.
+    expect(mat.prerequisites * FLOOR).toBeLessThanOrEqual(STANDARD)
   })
 })

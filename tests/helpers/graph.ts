@@ -1,8 +1,8 @@
 // Deterministic stand-ins for the renderer's text module plus shared graph checks for the tests.
 import type { GraphDataset } from '../../src/data/schema'
 import type { Rule } from '../../src/domain/types'
-import { DEFAULT_GEOMETRY_OPTIONS, dotRadius, samplePath } from '../../src/graph'
-import type { Geometry, LabelMeasure, PathSegment, Presentation, RoutedPath, Topology } from '../../src/graph'
+import { DEFAULT_GEOMETRY_OPTIONS, dotRadius, geometryOptions, horizontalRuns, samplePath } from '../../src/graph'
+import type { Geometry, HorizontalRun, LabelMeasure, PathSegment, Presentation, RoutedPath, Routes, Topology } from '../../src/graph'
 
 /** Average advance per character: codes at 13 / 600, titles at 12.5 / 400, plate code at 14 / 700. */
 export const CODE_CHAR = 7.2
@@ -83,11 +83,24 @@ export function pathOwners(topology: Topology, path: RoutedPath, focus: number):
 /** Every 1 px sample of every path that falls strictly inside a non-endpoint obstacle (no inflation). */
 export function pathIntrusions(topology: Topology, paths: readonly RoutedPath[], boxes: readonly Box[], focus: number): string[] {
   const problems: string[] = []
+  // 64 px buckets so a full-dataset sweep stays fast; the test itself is exact.
+  const cell = (value: number) => Math.floor(value / 64)
+  const buckets = new Map<string, Box[]>()
+  for (const box of boxes) {
+    for (let gx = cell(box.x0); gx <= cell(box.x1); gx++) {
+      for (let gy = cell(box.y0); gy <= cell(box.y1); gy++) {
+        const key = `${gx},${gy}`
+        const list = buckets.get(key)
+        if (list) list.push(box)
+        else buckets.set(key, [box])
+      }
+    }
+  }
   for (const path of paths) {
     const owners = pathOwners(topology, path, focus)
     const label = path.edge < 0 ? `${path.shape}` : `${topology.nodes[topology.edges[path.edge].from].code}>${topology.nodes[topology.edges[path.edge].to].code}`
     samplePath(path.segments, 1, (x, y) => {
-      for (const box of boxes) {
+      for (const box of buckets.get(`${cell(x)},${cell(y)}`) ?? []) {
         if (owners.includes(box.owner)) continue
         if (x > box.x0 && x < box.x1 && y > box.y0 && y < box.y1) {
           problems.push(`${label} (${path.shape}) crosses ${box.what} at ${x.toFixed(1)},${y.toFixed(1)}`)
@@ -120,6 +133,90 @@ export function overlappingPairs(topology: Topology, geometry: Geometry): string
   return pairs
 }
 
+/** Source and target node of a routed path (-1 where a trunk or fork has none); paths sharing one may share runs. */
+export function pathEnds(topology: Topology, path: RoutedPath, focus: number): { from: number; to: number } {
+  if (path.edge >= 0) return topology.edges[path.edge]
+  return path.shape === 'trunk' && path.role === 'unlock-direct' ? { from: focus, to: -1 } : { from: -1, to: focus }
+}
+
+/** Horizontal run of a routed path, with the path it belongs to. */
+interface PathRun extends HorizontalRun {
+  path: number
+}
+
+const EPS = 1e-6
+/** Trunk ends are staggered up to ± 9 px around the focus row (8.9). */
+const STAGGER_MAX = 9
+const SLOT = 3
+
+/**
+ * Where routed paths may run and reach (design-spec 8.8 and the corridor containment rule):
+ * - every sample lies inside the plot: below the band header and above geometry.height;
+ * - every horizontal run is on its own endpoint's row (a trunk: ± 9 px of the focus row), inside a
+ *   labelled lane's content (row gaps), or inside a lane-padding corridor band of a labelled lane:
+ *   the padding centre ± 3 px. Never on a lane line, in a slim or collapsed lane or in the header.
+ */
+export function containmentProblems(topology: Topology, geometry: Geometry, routes: Routes, focus: number): string[] {
+  const opt = geometryOptions(geometry)
+  const pad = opt.lanePaddingY
+  const problems: string[] = []
+  const name = (path: RoutedPath) => (path.edge < 0 ? path.shape : `${topology.nodes[topology.edges[path.edge].from].code}>${topology.nodes[topology.edges[path.edge].to].code}`)
+  const laneAt = (y: number) => geometry.lanes.findIndex(lane => y >= lane.y - EPS && y <= lane.y + lane.h + EPS && lane.h > 0)
+  for (const path of routes.paths) {
+    samplePath(path.segments, 2, (x, y) => {
+      if (y >= opt.bandHeaderHeight - EPS && y <= geometry.height + EPS) return false
+      problems.push(`${name(path)} leaves the plot at ${x.toFixed(1)},${y.toFixed(1)}`)
+      return true
+    })
+    const { from, to } = pathEnds(topology, path, focus)
+    const rows = [from, to].filter(v => v >= 0).map(v => geometry.nodes[v].cy)
+    const slack = path.edge < 0 || path.shape === 'branch' ? STAGGER_MAX : 0
+    for (const run of horizontalRuns(path.segments, 2)) {
+      if (rows.some(cy => Math.abs(run.y - cy) <= slack + EPS)) continue
+      const l = laneAt(run.y)
+      const lane = geometry.lanes[l]
+      const where = `${name(path)} runs at y=${run.y.toFixed(1)} (${run.x0.toFixed(0)}-${run.x1.toFixed(0)})`
+      if (l < 0 || lane.collapsed || lane.slim) {
+        problems.push(`${where} outside any labelled lane${l >= 0 ? ` (${topology.lanes[l].subject}${lane.slim ? ', slim' : ''})` : ''}`)
+        continue
+      }
+      const top = run.y - lane.y
+      const bottom = lane.y + lane.h - run.y
+      const inContent = top >= pad - EPS && bottom >= pad - EPS
+      const inCorridor = Math.abs(top - pad / 2) <= SLOT + EPS || Math.abs(bottom - pad / 2) <= SLOT + EPS
+      if (!inContent && !inCorridor) problems.push(`${where}: in ${topology.lanes[l].subject}'s padding outside the corridor band`)
+    }
+  }
+  return problems
+}
+
+/** Pairs of unrelated paths (no shared endpoint) whose horizontal runs lie within `clear` px over more than `overlap` px. */
+export function coincidentRuns(topology: Topology, routes: Routes, focus: number, clear = 1.5, overlap = 4): string[] {
+  const runs: PathRun[] = []
+  routes.paths.forEach((path, i) => {
+    for (const run of horizontalRuns(path.segments, overlap)) runs.push({ ...run, path: i })
+  })
+  runs.sort((a, b) => a.y - b.y)
+  const ends = routes.paths.map(path => pathEnds(topology, path, focus))
+  const label = (i: number) => {
+    const path = routes.paths[i]
+    return path.edge < 0 ? path.shape : `${topology.nodes[topology.edges[path.edge].from].code}>${topology.nodes[topology.edges[path.edge].to].code}`
+  }
+  const problems: string[] = []
+  for (let i = 0; i < runs.length; i++) {
+    for (let k = i + 1; k < runs.length && runs[k].y - runs[i].y < clear; k++) {
+      const a = runs[i]
+      const b = runs[k]
+      if (a.path === b.path || Math.min(a.x1, b.x1) - Math.max(a.x0, b.x0) <= overlap) continue
+      const ea = ends[a.path]
+      const eb = ends[b.path]
+      if ((ea.from >= 0 && ea.from === eb.from) || (ea.to >= 0 && ea.to === eb.to)) continue
+      problems.push(`${label(a.path)} and ${label(b.path)} share a run at y=${a.y.toFixed(1)}`)
+    }
+  }
+  return problems
+}
+
 /** End point of a path. */
 export function lastPoint(segments: readonly PathSegment[]): { x: number; y: number } {
   const last = segments[segments.length - 1]
@@ -136,4 +233,81 @@ export function bestOf<T>(runs: number, fn: () => T): { result: T; ms: number } 
     best = Math.min(best, performance.now() - started)
   }
   return { result, ms: best }
+}
+
+/**
+ * Product rule (no edge may seem to link two courses of one column), wrapped tracks: pairs of a path
+ * leaving a source in a wrapped column and a path entering a target in that column whose horizontal
+ * runs inside the column lie within `clear` px over more than `overlap` px. Such a pair reads as one
+ * line from the source to the target.
+ */
+export function wrappedMerges(
+  topology: Topology, geometry: Geometry, paths: ReadonlyArray<{ edge: number; segments: readonly PathSegment[]; ends?: { from: number; to: number } }>,
+  clear = 1.5, overlap = 4,
+): string[] {
+  interface Run extends HorizontalRun {
+    col: number
+    kind: 'head' | 'tail'
+    path: number
+  }
+  const runs: Run[] = []
+  paths.forEach((path, i) => {
+    const ends = path.ends ?? (path.edge >= 0 ? topology.edges[path.edge] : null)
+    if (!ends) return
+    for (const run of horizontalRuns(path.segments, overlap)) {
+      for (const [v, kind] of [[ends.from, 'head'], [ends.to, 'tail']] as const) {
+        if (v < 0) continue
+        const column = geometry.columns[topology.nodes[v].col]
+        if (column.tracks < 2) continue
+        const x0 = Math.max(run.x0, column.x)
+        const x1 = Math.min(run.x1, column.x + column.w)
+        if (x1 - x0 > overlap) runs.push({ y: run.y, x0, x1, col: topology.nodes[v].col, kind, path: i })
+      }
+    }
+  })
+  runs.sort((a, b) => a.y - b.y)
+  const name = (i: number) => {
+    const e = paths[i].edge
+    return e < 0 ? 'bundle' : `${topology.nodes[topology.edges[e].from].code}>${topology.nodes[topology.edges[e].to].code}`
+  }
+  const problems: string[] = []
+  for (let i = 0; i < runs.length; i++) {
+    for (let k = i + 1; k < runs.length && runs[k].y - runs[i].y < clear; k++) {
+      const a = runs[i]
+      const b = runs[k]
+      if (a.col !== b.col || a.kind === b.kind || a.path === b.path) continue
+      if (Math.min(a.x1, b.x1) - Math.max(a.x0, b.x0) <= overlap) continue
+      problems.push(`${name(a.path)} and ${name(b.path)} meet in one row gap of a wrapped column at y=${a.y.toFixed(1)}`)
+    }
+  }
+  return problems
+}
+
+/**
+ * Product rule, wrapped tracks: strokes of edges anchored in a node's column that lie on the row of a
+ * later-track node (± 6 px) in the 10 px before its dot, where they would read as reaching for it
+ * from the previous track's label. Its own incoming edges enter from above or below at cx instead.
+ */
+export function laterTrackReaches(topology: Topology, geometry: Geometry, paths: ReadonlyArray<{ edge: number; segments: readonly PathSegment[] }>): string[] {
+  const zones = new Map<number, Array<{ v: number; x0: number; x1: number; y0: number; y1: number }>>()
+  geometry.nodes.forEach((box, v) => {
+    if ((box.cls !== 'full' && box.cls !== 'compact') || box.track === 0) return
+    const col = topology.nodes[v].col
+    const list = zones.get(col) ?? []
+    list.push({ v, x0: box.cx - 5 - 10, x1: box.cx - 5, y0: box.cy - 6, y1: box.cy + 6 })
+    zones.set(col, list)
+  })
+  const problems: string[] = []
+  for (const path of paths) {
+    if (path.edge < 0) continue
+    const { from, to } = topology.edges[path.edge]
+    const own = [...new Set([topology.nodes[from].col, topology.nodes[to].col])].flatMap(col => zones.get(col) ?? []).filter(z => z.v !== to)
+    if (!own.length) continue
+    samplePath(path.segments, 1, (x, y) => {
+      const zone = own.find(z => x > z.x0 && x < z.x1 && y > z.y0 && y < z.y1)
+      if (zone && problems.length < 20) problems.push(`${topology.nodes[from].code}>${topology.nodes[to].code} reaches ${topology.nodes[zone.v].code} on its row at ${x.toFixed(1)},${y.toFixed(1)}`)
+      return Boolean(zone)
+    })
+  }
+  return problems
 }

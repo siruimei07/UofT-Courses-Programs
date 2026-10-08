@@ -4,7 +4,11 @@ import type {
   BandBox, ColumnBox, DisplayClass, Geometry, GeometryOptions, LabelMeasure, LaneBox, NodeBox, Presentation, Topology,
 } from './types'
 
-/** Design-spec 8.1. Tuned here and nowhere else (fit tuning order: columnGap, bandPad*, fullLabelMax). */
+/**
+ * Design-spec 8.1, after its fit tuning order (columnGap 28 → 24, bandPad 14 / 10 → 10 / 8,
+ * fullLabelMax 184 → 172): the CSC148H5 chain at 1920 × 1080 with the panel open still misses the
+ * 0.92 floor by about 2 %, so every step applies (known limit recorded in tests/graph-geometry.test.ts).
+ */
 export const DEFAULT_GEOMETRY_OPTIONS: GeometryOptions = {
   laneHeaderWidth: 176,
   bandHeaderHeight: 60,
@@ -13,9 +17,9 @@ export const DEFAULT_GEOMETRY_OPTIONS: GeometryOptions = {
   divisionLabelHeight: 17,
   laneSlimHeight: 30,
   laneCollapsedHeight: 0,
-  bandPadLeft: 14,
-  bandPadRight: 10,
-  columnGap: 28,
+  bandPadLeft: 10,
+  bandPadRight: 8,
+  columnGap: 24,
   miniColumnGap: 6,
   colWidth: { full: 212, compact: 104, mini: 22 },
   rowHeight: { full: 40, compact: 22, mini: 8 },
@@ -27,7 +31,21 @@ export const DEFAULT_GEOMETRY_OPTIONS: GeometryOptions = {
   trackGap: 8,
   dotInset: 8,
   labelX: 20,
-  fullLabelMax: 184,
+  fullLabelMax: 172,
+}
+
+/**
+ * A computed geometry also carries the effective options it was laid out with (not part of the
+ * `Geometry` contract), so routes and anchors always use the same lane padding, row heights and
+ * track gap as the boxes. Read them with `geometryOptions`.
+ */
+export interface LaidOutGeometry extends Geometry {
+  options: GeometryOptions
+}
+
+/** The options a geometry was computed with; the defaults for geometries built elsewhere (e.g. tweens). */
+export function geometryOptions(geometry: Geometry): GeometryOptions {
+  return (geometry as Partial<LaidOutGeometry>).options ?? DEFAULT_GEOMETRY_OPTIONS
 }
 
 /** Not a spec constant: extra input that only the text module can know. */
@@ -79,7 +97,7 @@ export function computeGeometry(
   presentation: Presentation,
   measure: LabelMeasure,
   options: Partial<GeometryOptions> & GeometryExtras = {},
-): Geometry {
+): LaidOutGeometry {
   if (presentation.cls.length !== topology.nodes.length) {
     throw new Error(`Presentation has ${presentation.cls.length} classes for ${topology.nodes.length} nodes`)
   }
@@ -98,20 +116,23 @@ export function computeGeometry(
   const nodes = new Array<NodeBox>(topology.nodes.length)
   const lanes: LaneBox[] = []
   const ctx: LaneContext = { topology, cls, focus, rowH, labelW, columns: columns.boxes, nodes, opt }
+  // The division label sits on the first lane of each division (display order) that is neither
+  // collapsed nor slim; only that lane gets the extra minimum height. The lane column uses the flag.
+  const labelledDivisions = new Set<string>()
   let y = opt.bandHeaderHeight
   topology.lanes.forEach((lane, l) => {
-    // The division label sits on the first lane of each division in static lane order.
-    const firstOfDivision = l === 0 || topology.lanes[l - 1].division !== lane.division
     let box: LaneBox
     if (modes[l] === 'collapsed') {
-      box = { y, h: opt.laneCollapsedHeight, collapsed: true, slim: false }
+      box = { y, h: opt.laneCollapsedHeight, collapsed: true, slim: false, divisionLabel: false }
     } else if (modes[l] === 'slim') {
-      box = { y, h: opt.laneSlimHeight, collapsed: false, slim: true }
+      box = { y, h: opt.laneSlimHeight, collapsed: false, slim: true, divisionLabel: false }
       layoutSlimLane(topology.cells[l], y + opt.laneSlimHeight / 2, ctx)
     } else {
+      const divisionLabel = !labelledDivisions.has(lane.division)
+      labelledDivisions.add(lane.division)
       const tallest = layoutLabelledLane(plans[l], y + opt.lanePaddingY, ctx)
-      const minimum = opt.laneMinHeight + (firstOfDivision ? opt.divisionLabelHeight : 0)
-      box = { y, h: Math.max(minimum, 2 * opt.lanePaddingY + tallest), collapsed: false, slim: false }
+      const minimum = opt.laneMinHeight + (divisionLabel ? opt.divisionLabelHeight : 0)
+      box = { y, h: Math.max(minimum, 2 * opt.lanePaddingY + tallest), collapsed: false, slim: false, divisionLabel }
     }
     for (const v of lane.nodes) {
       if (cls[v] !== 'hidden') continue
@@ -121,7 +142,7 @@ export function computeGeometry(
     lanes.push(box)
     y += box.h
   })
-  return { nodes, columns: columns.boxes, lanes, bands, width, height: y }
+  return { nodes, columns: columns.boxes, lanes, bands, width, height: y, options: opt }
 }
 
 function mergeOptions(options: Partial<GeometryOptions> & GeometryExtras) {

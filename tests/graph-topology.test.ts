@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { bandOfLevel, buildTopology, collectDescendants } from '../src/graph'
+import { bandOfLevel, buildTopology, collectDescendants, laneTone } from '../src/graph'
+import { laneDivision } from '../src/graph/tokens'
 import type { GraphDataset } from '../src/data/schema'
 import type { Topology } from '../src/graph'
 import { loadGraphDataset, syntheticDataset } from './helpers/dataset'
@@ -189,6 +190,19 @@ describe('topology on the real UTM dataset', () => {
     })
   })
 
+  it('alternates lane tones within each division family in static lane order (7.7, 19.8)', () => {
+    const seen = new Map<string, number>()
+    topology.lanes.forEach((lane, l) => {
+      const family = laneDivision(lane.division)
+      const k = seen.get(family) ?? 0
+      seen.set(family, k + 1)
+      expect(laneTone(topology, l), lane.subject).toBe(k % 2 === 0 ? 1 : 2)
+      // Adjacent lanes of one division always differ.
+      if (l > 0 && topology.lanes[l - 1].division === lane.division) expect(laneTone(topology, l)).not.toBe(laneTone(topology, l - 1))
+    })
+    expect(seen.size).toBeGreaterThan(1)
+  })
+
   it('is deterministic', () => {
     const again = buildTopology(dataset)
     expect(again.nodes).toEqual(topology.nodes)
@@ -272,6 +286,20 @@ describe('topology on synthetic datasets', () => {
     expect(topo.lanes.map(lane => lane.subject)).toEqual(['MMM', 'ZZZ', 'AAA', 'QQQ'])
     expect(topo.lanes[1]).toMatchObject({ key: 'UTM:ZZZ', name: 'Zed', department: 'Dept Z', division: 'sci' })
     expect(topo.lanes[3]).toMatchObject({ name: 'QQQ', department: '', division: '' })
+  })
+
+  it('counts lanes without a known division family as interdisciplinary when alternating tones', () => {
+    const topo = buildTopology(syntheticDataset(
+      ['AAA', 'BBB', 'CCC', 'DDD', 'EEE', 'FFF', 'GGG'].map(subject => ({ code: `${subject}101H5` })),
+      [
+        { code: 'AAA', division: 'sciences' }, { code: 'BBB', division: 'sciences' }, { code: 'CCC', division: 'sciences' },
+        { code: 'DDD', division: 'humanities' }, { code: 'EEE', division: 'interdisciplinary' }, { code: 'GGG', division: 'other' },
+      ],
+      [{ id: 'sciences', label: 'Sciences' }, { id: 'humanities', label: 'Humanities' }, { id: 'interdisciplinary', label: 'Interdisciplinary' }],
+    ))
+    // FFF has no division and GGG an unknown one: both sort last and continue the interdisciplinary tones.
+    expect(topo.lanes.map(lane => lane.subject)).toEqual(['AAA', 'BBB', 'CCC', 'DDD', 'EEE', 'FFF', 'GGG'])
+    expect(topo.lanes.map(lane => laneTone(topo, lane.index))).toEqual([1, 2, 1, 1, 1, 2, 1])
   })
 
   it('orders a cell by the barycentre of predecessor positions before code', () => {

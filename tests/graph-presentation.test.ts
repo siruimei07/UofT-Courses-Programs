@@ -189,12 +189,14 @@ describe('presentation rules on a synthetic graph', () => {
     expect(classes(run({ programIds, hideUnrelated: true }))).toMatchObject({ AAA101H5: 'hidden', BBB101H5: 'full' })
   })
 
-  it('lets chain classes win when a course is focused inside a program; other program courses become minis', () => {
+  it('lets chain classes win when a course is focused inside a program; other program courses become compact (7.3, 19.7)', () => {
     const programIds = new Set(['UTM:BBB101H5', 'UTM:BBB201H5', 'UTM:AAA401H5', 'UTM:AAA101H5'])
     const focused = run({ programIds, focusId: 'UTM:AAA301H5', chainTitles: 'direct' })
     expect(roleOf(synthetic, focused, 'AAA401H5')).toBe('unlock-direct')
     expect(roleOf(synthetic, focused, 'BBB101H5')).toBe('program')
-    expect(classes(focused)).toMatchObject({ AAA401H5: 'full', AAA101H5: 'compact', BBB101H5: 'mini', BBB201H5: 'mini', CCC010H5: 'mini' })
+    expect(classes(focused)).toMatchObject({ AAA401H5: 'full', AAA101H5: 'compact', BBB101H5: 'compact', BBB201H5: 'compact', CCC010H5: 'mini' })
+    // Chain titles 'all' (or Titles) never turn them full: compact is the program-outside-chain style.
+    expect(classes(run({ programIds, focusId: 'UTM:AAA301H5', titles: true }))).toMatchObject({ BBB101H5: 'compact', BBB201H5: 'compact' })
     expect(focused.inProgram[at(synthetic, 'BBB101H5')]).toBe(true)
     expect(focused.inProgram[at(synthetic, 'AAA101H5')]).toBe(true)
     expect(edgeRoleOf(synthetic, focused, 'BBB101H5', 'BBB201H5')).toBe('hidden')

@@ -52,9 +52,9 @@ interface Context {
  * - course selected: focus, direct prerequisites and direct unlocks `full`; transitive chain nodes
  *   `full` when chain titles resolve to 'all' (or Titles is on), `compact` otherwise;
  * - program only: program courses `full`;
- * - everything else while dimming: `mini`, or `hidden` with Hide unrelated. During a selection
- *   program courses outside the chain are such "everything else"; they keep `inProgram` (and the
- *   `program` role) so the renderer can still ring them;
+ * - course selected while a program is active (7.3, owner decision 19.7): program courses outside
+ *   the chain are `compact` (role `program`, `inProgram`), or `hidden` with Hide unrelated;
+ * - everything else while dimming: `mini`, or `hidden` with Hide unrelated;
  * - level, subject and Hide completed filters hide nodes by their own level / subject / record,
  *   but never the focus.
  */
@@ -95,6 +95,7 @@ export function computePresentation(topology: Topology, input: PresentationInput
         return transitive
       case 'program':
         if (!hasFocus) return 'full'
+        return input.hideUnrelated ? 'hidden' : 'compact'
     }
     return input.hideUnrelated ? 'hidden' : 'mini'
   })
