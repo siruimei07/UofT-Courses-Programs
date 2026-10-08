@@ -1,219 +1,240 @@
+// Evaluator core, Rule helpers and record merging (src/domain). Synthetic ids only; real-data
+// regressions live in domain-official.test.ts and catalog.test.ts, the engine API in domain-engine.test.ts.
+import { readdirSync, readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import {
-  createEmptyProfile, EMPTY_PROFILE, evaluateEligibility, evaluateProgram, evaluateRule,
-  findDependencyCycles, getPossibleUnlocks, getRelatedCourses, parseStudentProfile,
-  recommendCourses, ruleCourseIds, serializeStudentProfile,
-} from '../src/domain'
-import type { Catalog, Course, Program, Requirement, Rule, StudentProfile } from '../src/domain'
+import { containsOpaque, recordFromRows, ruleCourseIds } from '../src/domain'
+import type { RecordEntryLike, Rule } from '../src/domain'
+import { combine, createEvalContext, evaluateRule, usedCourses, type Counting, type RuleIndex } from '../src/domain/evaluate'
 
-// Synthetic fixtures deliberately use non-catalogue IDs. Official data integration is separate.
-const ref = (code: string): Rule => ({ kind: 'course', courseId: `UTM:${code}` })
-const req = (rule: Rule = { kind: 'true' }, rawText = ''): Requirement => ({ rule, rawText, courseIds: ruleCourseIds(rule), sourceUrl: 'https://utm.calendar.utoronto.ca/' })
-const course = (code: string, options: Partial<Course> = {}): Course => ({
-  id: `UTM:${code}`, campus: 'UTM', code, title: `Synthetic ${code}`, subject: code.slice(0, 3), level: Number(code[3]) * 100,
-  credits: code.includes('Y') ? 1 : 0.5, description: '', sourceUrl: `https://utm.calendar.utoronto.ca/course/${code.toLowerCase()}`,
-  contentHash: 'synthetic', fetchedAt: '2026-01-01', prerequisites: req(), corequisites: req(), exclusions: req(),
-  recommended: req(), restrictions: req(), notes: '', ...options,
-})
-const A = course('TST100H5'), B = course('TST101H5'), C = course('TST200H5'), D = course('TST300H5')
-const courses = [A, B, C, D]
-const profile = (ids: string[] = [], options: Partial<StudentProfile> = {}): StudentProfile => ({
-  schemaVersion: 1, courses: ids.map(courseId => ({ courseId, status: 'completed' })), recordComplete: true, admittedPrograms: [], ...options,
-})
-const program = (rule: Rule, options: Partial<Program> = {}): Program => ({
-  id: 'UTM:TEST', campus: 'UTM', code: 'TEST', title: 'Synthetic Test Major', type: 'Major', description: '',
-  sourceUrl: 'https://utm.calendar.utoronto.ca/program/test', contentHash: 'synthetic', fetchedAt: '2026-01-01',
-  admission: req(), completion: req(rule), groups: [{ ...req(rule), id: 'test-group', category: 'completion', label: 'Synthetic requirement' }], notes: '', ...options,
-})
-const catalog = (allCourses: Course[], programs: Program[]): Catalog => ({
-  schemaVersion: 1, metadata: { campus: 'UTM', academicYear: 'synthetic', academicYearSource: '', fetchedAt: '', parserVersion: 'test', sources: [], complete: true }, courses: allCourses, programs,
-})
+const id = (code: string) => (code.includes(':') ? code : `UTM:${code}`)
+const course = (code: string): Rule => ({ kind: 'course', courseId: id(code) })
+const minGrade = (code: string, minimum: number): Rule => ({ kind: 'minGrade', courseId: id(code), minimum })
+const all = (...items: Rule[]): Rule => ({ kind: 'all', items })
+const any = (...items: Rule[]): Rule => ({ kind: 'any', items })
+const unknown = (text = 'Unparsed wording'): Rule => ({ kind: 'unknown', text, reason: 'test' })
 
-describe('three-state rule semantics', () => {
+// TST = subject, digit 1-4 = level, H/Y = half/full credit.
+const CODES = ['TST100H5', 'TST101H5', 'TST102Y5', 'TST200H5', 'TST201H5', 'TST300H5', 'OTH100H5', 'OTH300Y5']
+function index(exclusionPairs: [string, string][] = []): RuleIndex {
+  const courses = new Map(CODES.map(code => [id(code), {
+    credits: code[6] === 'Y' ? 1 : 0.5, subject: code.slice(0, 3), level: Number(code[3]) * 100,
+  }]))
+  const exclusionPeers = new Map<string, Set<string>>()
+  for (const [a, b] of exclusionPairs) {
+    for (const [x, y] of [[a, b], [b, a]]) {
+      if (!exclusionPeers.has(id(x))) exclusionPeers.set(id(x), new Set())
+      exclusionPeers.get(id(x))!.add(id(y))
+    }
+  }
+  return { courses, exclusionPeers }
+}
+type Row = [string, RecordEntryLike['status'], number?]
+const record = (...rows: Row[]) => new Map(rows.map(([code, status, grade]) =>
+  [id(code), grade === undefined ? { status } : { status, grade }] as [string, RecordEntryLike]))
+const status = (rule: Rule, rows: Row[], counting: Counting = 'current', pairs: [string, string][] = []) =>
+  evaluateRule(rule, createEvalContext(index(pairs), record(...rows)), counting).status
+
+describe('three-valued logic', () => {
+  it('combines AND / OR with unknown propagation', () => {
+    expect(combine('all', ['met', 'met'])).toBe('met')
+    expect(combine('all', ['met', 'unknown'])).toBe('unknown')
+    expect(combine('all', ['unknown', 'unmet'])).toBe('unmet')
+    expect(combine('any', ['unmet', 'met'])).toBe('met')
+    expect(combine('any', ['unmet', 'unknown'])).toBe('unknown')
+    expect(combine('any', ['unmet', 'unmet'])).toBe('unmet')
+    expect(combine('all', [])).toBe('met')
+  })
+
   it('(A OR B) AND C requires both groups', () => {
-    const rule: Rule = { kind: 'all', items: [{ kind: 'any', items: [ref(A.code), ref(B.code)] }, ref(C.code)] }
-    expect(evaluateRule(rule, profile([A.id]), courses).status).toBe('unmet')
-    expect(evaluateRule(rule, profile([A.id, C.id]), courses).status).toBe('met')
-    expect(evaluateRule(rule, createEmptyProfile(), courses).status).toBe('unknown')
+    const rule = all(any(course('TST100H5'), course('TST101H5')), course('TST200H5'))
+    expect(status(rule, [['TST100H5', 'completed']])).toBe('unmet')
+    expect(status(rule, [['TST101H5', 'completed'], ['TST200H5', 'completed']])).toBe('met')
+    expect(status(rule, [])).toBe('unmet')
   })
-  it('propagates unknown through AND / OR without replacing it with no requirement', () => {
-    const unknown: Rule = { kind: 'unknown', text: 'Selection process', reason: 'Requires review' }
-    expect(evaluateRule({ kind: 'all', items: [ref(A.code), unknown] }, profile(), courses).status).toBe('unmet')
-    expect(evaluateRule({ kind: 'all', items: [ref(A.code), unknown] }, profile([A.id]), courses).status).toBe('unknown')
-    expect(evaluateRule({ kind: 'any', items: [ref(A.code), unknown] }, profile([A.id]), courses).status).toBe('met')
-    expect(evaluateRule({ kind: 'any', items: [ref(A.code), unknown] }, profile(), courses).status).toBe('unknown')
+
+  it('keeps unparsed text unknown instead of dropping it', () => {
+    expect(status(all(course('TST100H5'), unknown()), [])).toBe('unmet')
+    expect(status(all(course('TST100H5'), unknown()), [['TST100H5', 'completed']])).toBe('unknown')
+    expect(status(any(course('TST100H5'), unknown()), [['TST100H5', 'completed']])).toBe('met')
+    expect(status(any(course('TST100H5'), unknown()), [])).toBe('unknown')
+    expect(status({ kind: 'permission', text: 'Permission of instructor' }, [])).toBe('unknown')
+    expect(status({ kind: 'program', programId: 'UTM:ERMAJ0001' }, [])).toBe('unknown')
+    expect(status({ kind: 'true' }, [])).toBe('met')
   })
-  it('distinguishes absent records from a complete empty transcript', () => {
-    expect(evaluateRule(ref(A.code), EMPTY_PROFILE, courses).status).toBe('unknown')
-    expect(evaluateRule(ref(A.code), profile(), courses).status).toBe('unmet')
+
+  it('returns an EvalNode tree that mirrors the AST, with no prose', () => {
+    const rule = all(course('TST100H5'), any(minGrade('TST101H5', 60), unknown('Grade 12 Calculus')), { kind: 'credits', minimum: 1 })
+    const node = evaluateRule(rule, createEvalContext(index(), record(['TST100H5', 'completed'], ['TST101H5', 'completed', 72])), 'current')
+    expect(node).toEqual({
+      kind: 'all', status: 'met', children: [
+        { kind: 'course', status: 'met', courseId: 'UTM:TST100H5' },
+        { kind: 'any', status: 'met', children: [
+          { kind: 'minGrade', status: 'met', courseId: 'UTM:TST101H5', minimum: 60 },
+          { kind: 'unknown', status: 'unknown', text: 'Grade 12 Calculus' },
+        ] },
+        { kind: 'credits', status: 'met', minimum: 1, earned: 1 },
+      ],
+    })
   })
-  it('never counts planned records and only allows in-progress records for explicit concurrent evaluation', () => {
-    for (const status of ['planned', 'inProgress'] as const) {
-      const student = profile([], { courses: [{ courseId: A.id, status }] })
-      expect(evaluateRule(ref(A.code), student, courses).status).toBe('unmet')
-      expect(evaluateRule(ref(A.code), student, courses, { allowInProgress: true }).status).toBe(status === 'inProgress' ? 'met' : 'unmet')
+})
+
+describe('course and grade leaves', () => {
+  it('treats unmarked courses as not taken', () => {
+    expect(status(course('TST100H5'), [])).toBe('unmet')
+  })
+
+  it('counts a completed course without a grade as passed and below 50 as failed', () => {
+    expect(status(course('TST100H5'), [['TST100H5', 'completed']])).toBe('met')
+    expect(status(course('TST100H5'), [['TST100H5', 'completed', 50]])).toBe('met')
+    expect(status(course('TST100H5'), [['TST100H5', 'completed', 49]])).toBe('unmet')
+  })
+
+  it('counts in-progress courses for prerequisites but not for completed-only progress', () => {
+    expect(status(course('TST100H5'), [['TST100H5', 'inProgress']], 'current')).toBe('met')
+    expect(status(course('TST100H5'), [['TST100H5', 'inProgress']], 'completed')).toBe('unmet')
+  })
+
+  it('counts planned courses only when taken together (corequisites, plans)', () => {
+    expect(status(course('TST100H5'), [['TST100H5', 'planned']], 'current')).toBe('unmet')
+    expect(status(course('TST100H5'), [['TST100H5', 'planned']], 'planned')).toBe('met')
+  })
+
+  it('needs the final grade for a minimum grade', () => {
+    const rule = minGrade('TST100H5', 73)
+    expect(status(rule, [['TST100H5', 'completed', 73]])).toBe('met')
+    expect(status(rule, [['TST100H5', 'completed', 72]])).toBe('unmet')
+    expect(status(rule, [['TST100H5', 'completed']])).toBe('unknown')
+    expect(status(rule, [['TST100H5', 'completed', 45]])).toBe('unmet')
+    expect(status(rule, [['TST100H5', 'inProgress', 95]])).toBe('unknown')
+    expect(status(rule, [['TST100H5', 'planned']], 'current')).toBe('unmet')
+    expect(status(rule, [['TST100H5', 'planned']], 'planned')).toBe('unknown')
+    expect(status(rule, [])).toBe('unmet')
+  })
+
+  it('keeps campus identities distinct', () => {
+    expect(status(course('UTSG:TST100H1'), [['TST100H5', 'completed']])).toBe('unmet')
+    expect(status(course('UTSG:TST100H1'), [['UTSG:TST100H1', 'completed']])).toBe('met')
+  })
+
+  it('treats a cohort clause as met when its rule is met, otherwise as unknown', () => {
+    const rule: Rule = { kind: 'applicability', cohort: 'For students entering in 2027-28', rule: course('TST100H5') }
+    const met = evaluateRule(rule, createEvalContext(index(), record(['TST100H5', 'completed'])), 'current')
+    expect(met).toEqual({ kind: 'applicability', status: 'met', text: 'For students entering in 2027-28', children: [{ kind: 'course', status: 'met', courseId: 'UTM:TST100H5' }] })
+    expect(status(rule, [])).toBe('unknown')
+  })
+})
+
+describe('credits', () => {
+  const credits = (minimum: number, scope: Partial<Extract<Rule, { kind: 'credits' }>> = {}): Rule => ({ kind: 'credits', minimum, ...scope })
+  const earned = (rule: Rule, rows: Row[], counting: Counting = 'current', pairs: [string, string][] = []) =>
+    evaluateRule(rule, createEvalContext(index(pairs), record(...rows)), counting).earned
+
+  it('counts each passed course once and reports the credits earned', () => {
+    const rows: Row[] = [['TST100H5', 'completed'], ['TST102Y5', 'completed']]
+    expect(status(credits(1.5), rows)).toBe('met')
+    expect(status(credits(2), rows)).toBe('unmet')
+    expect(earned(credits(2), rows)).toBe(1.5)
+    const listed = { courseIds: [id('TST100H5'), id('TST100H5'), id('TST101H5')] }
+    expect(status(credits(1, listed), [['TST100H5', 'completed'], ['TST101H5', 'completed']])).toBe('met')
+    expect(status(credits(1, listed), [['TST100H5', 'completed'], ['TST102Y5', 'completed']])).toBe('unmet')
+  })
+
+  it('honours subject and minimum-level scopes', () => {
+    const rows: Row[] = [['TST100H5', 'completed'], ['TST200H5', 'completed'], ['OTH300Y5', 'completed']]
+    expect(earned(credits(1, { subject: 'TST' }), rows)).toBe(1)
+    expect(earned(credits(1, { level: 200 }), rows)).toBe(1.5)
+    expect(earned(credits(1, { subject: 'TST', level: 200 }), rows)).toBe(0.5)
+    expect(status(credits(1, { subject: 'TST', level: 200 }), rows)).toBe('unmet')
+  })
+
+  it('counts in-progress credits for prerequisites, planned only for plans, failed never', () => {
+    const rows: Row[] = [['TST100H5', 'completed'], ['TST101H5', 'inProgress'], ['TST200H5', 'planned'], ['TST201H5', 'completed', 30]]
+    expect(earned(credits(1), rows, 'completed')).toBe(0.5)
+    expect(earned(credits(1), rows, 'current')).toBe(1)
+    expect(earned(credits(1), rows, 'planned')).toBe(1.5)
+    expect(status(credits(1), rows, 'current')).toBe('met')
+    expect(status(credits(1), rows, 'completed')).toBe('unmet')
+  })
+
+  it('never adds up two courses that exclude each other', () => {
+    const rows: Row[] = [['TST100H5', 'completed'], ['TST101H5', 'completed'], ['TST200H5', 'completed']]
+    const pairs: [string, string][] = [['TST100H5', 'TST101H5']]
+    expect(earned(credits(1.5), rows, 'current', pairs)).toBe(1)
+    expect(status(credits(1), rows, 'current', pairs)).toBe('met')
+    expect(status(credits(1.5), rows, 'current', pairs)).toBe('unknown')
+    expect(status(credits(0.5, { courseIds: [id('TST100H5'), id('TST101H5')] }), rows, 'current', pairs)).toBe('met')
+  })
+
+  it('reads credit values of courses outside the dataset from their code', () => {
+    expect(status(credits(1, { courseIds: [id('UTSG:ABC100Y1')] }), [['UTSG:ABC100Y1', 'completed']])).toBe('met')
+    expect(status(credits(1), [['UTSG:ABC100H1', 'completed'], ['TST100H5', 'completed']])).toBe('met')
+    // A subject or level scope cannot be checked for another campus's course.
+    expect(status(credits(1, { subject: 'TST' }), [['UTSG:TST100H1', 'completed'], ['TST100H5', 'completed']])).toBe('unknown')
+    expect(status(credits(1, { subject: 'TST' }), [['UTSG:ABC100H1', 'completed']])).toBe('unmet')
+    expect(status(credits(1), [['UTSG:BAD', 'completed']])).toBe('unknown')
+  })
+})
+
+describe('courses that satisfy a met requirement', () => {
+  it('uses the first met option of an OR, every child of an AND and the counted credits', () => {
+    const ctx = createEvalContext(index(), record(['TST100H5', 'completed'], ['TST101H5', 'completed'], ['TST200H5', 'completed']))
+    expect(usedCourses(evaluateRule(any(course('TST300H5'), course('TST101H5'), course('TST100H5')), ctx, 'completed'), ctx)).toEqual([id('TST101H5')])
+    expect(usedCourses(evaluateRule(all(course('TST100H5'), course('TST200H5')), ctx, 'completed'), ctx)).toEqual([id('TST100H5'), id('TST200H5')])
+    expect(usedCourses(evaluateRule({ kind: 'credits', minimum: 0.5, subject: 'TST', level: 200 }, ctx, 'completed'), ctx)).toEqual([id('TST200H5')])
+    expect(usedCourses(evaluateRule(course('TST300H5'), ctx, 'completed'), ctx)).toEqual([])
+  })
+})
+
+describe('rule helpers', () => {
+  it('lists structured references once, in first-occurrence order', () => {
+    const rule = all(course('TST200H5'), any(course('TST100H5'), minGrade('TST200H5', 60)),
+      { kind: 'credits', minimum: 1, courseIds: [id('TST101H5')] },
+      { kind: 'applicability', cohort: 'x', rule: course('UTSG:TST100H1') }, unknown('TST300H5 or equivalent'))
+    expect(ruleCourseIds(rule)).toEqual([id('TST200H5'), id('TST100H5'), id('TST101H5'), 'UTSG:TST100H1'])
+  })
+
+  it('flags rules with leaves a record cannot decide', () => {
+    expect(containsOpaque(all(course('TST100H5'), unknown()))).toBe(true)
+    expect(containsOpaque(any(course('TST100H5'), { kind: 'permission', text: 'p' }))).toBe(true)
+    expect(containsOpaque({ kind: 'applicability', cohort: 'x', rule: course('TST100H5') })).toBe(false)
+    expect(containsOpaque({ kind: 'credits', minimum: 1 })).toBe(false)
+  })
+})
+
+describe('records built from repeated rows', () => {
+  it('keeps the strongest row whatever the order (duplicate records)', () => {
+    const rows = [
+      { courseId: id('TST100H5'), status: 'completed' as const, grade: 30 },
+      { courseId: id('TST100H5'), status: 'completed' as const, grade: 80 },
+      { courseId: id('TST101H5'), status: 'planned' as const },
+      { courseId: id('TST101H5'), status: 'inProgress' as const },
+      { courseId: id('TST200H5'), status: 'completed' as const, grade: 20 },
+      { courseId: id('TST200H5'), status: 'inProgress' as const },
+      { courseId: id('TST201H5'), status: 'completed' as const },
+      { courseId: id('TST201H5'), status: 'completed' as const, grade: 65 },
+    ]
+    for (const ordered of [rows, [...rows].reverse()]) {
+      const merged = recordFromRows(ordered)
+      expect(merged.size).toBe(4)
+      expect(merged.get(id('TST100H5'))).toEqual({ status: 'completed', grade: 80 })
+      expect(merged.get(id('TST101H5'))).toEqual({ status: 'inProgress' })
+      expect(merged.get(id('TST200H5'))).toEqual({ status: 'inProgress' })
+      expect(merged.get(id('TST201H5'))).toEqual({ status: 'completed', grade: 65 })
+      const ctx = createEvalContext(index(), merged)
+      expect(evaluateRule(minGrade('TST100H5', 70), ctx, 'current').status).toBe('met')
     }
   })
-  it('requires the final grade when a minimum is specified', () => {
-    const rule: Rule = { kind: 'minGrade', courseId: A.id, minimum: 73 }
-    expect(evaluateRule(rule, profile([A.id]), courses).status).toBe('unknown')
-    expect(evaluateRule(rule, profile([], { courses: [{ courseId: A.id, status: 'completed', grade: 72 }] }), courses).status).toBe('unmet')
-    expect(evaluateRule(rule, profile([], { courses: [{ courseId: A.id, status: 'completed', grade: 73 }] }), courses).status).toBe('met')
-    expect(evaluateRule(rule, profile([], { courses: [{ courseId: A.id, status: 'inProgress', grade: 95 }] }), courses, { allowInProgress: true }).status).toBe('unknown')
-  })
-  it('keeps a failed grade in the transcript without treating it as passing or earned credit', () => {
-    const student = profile([], { courses: [{ courseId: A.id, status: 'completed', grade: 49 }] })
-    expect(evaluateRule(ref(A.code), student, courses).status).toBe('unmet')
-    expect(evaluateRule({ kind: 'credits', minimum: 0.5 }, student, courses).status).toBe('unmet')
-    expect(evaluateRule(ref(A.code), profile([], { courses: [{ courseId: A.id, status: 'completed', grade: 50 }] }), courses).status).toBe('met')
-    const target = course(B.code, { prerequisites: req(ref(A.code)) })
-    const graded = course(C.code, { prerequisites: req({ kind: 'minGrade', courseId: A.id, minimum: 70 }) })
-    expect(getPossibleUnlocks(A.id, [A, target, graded], student).newlyEligible).toEqual([B.id])
-    expect(student.courses[0].grade).toBe(49)
-    const degree = program(ref(A.code))
-    expect(recommendCourses(degree, catalog(courses, [degree]), student).map(r => r.courseId)).toContain(A.id)
-  })
-  it('counts credit sets uniquely and preserves unknown external credit values', () => {
-    const student = profile([A.id, A.id, B.id])
-    expect(evaluateRule({ kind: 'credits', minimum: 1.5, courseIds: [A.id, A.id, B.id] }, student, courses).status).toBe('unmet')
-    expect(evaluateRule({ kind: 'credits', minimum: 1, courseIds: [A.id, A.id, B.id] }, student, courses).status).toBe('met')
-    expect(evaluateRule({ kind: 'credits', minimum: 1, courseIds: [] }, student, courses).status).toBe('unmet')
-    expect(evaluateRule({ kind: 'credits', minimum: 1 }, profile(['UTSG:TST100H1']), courses).status).toBe('unknown')
-    expect(evaluateRule({ kind: 'credits', minimum: 1, level: 200 }, profile([A.id, C.id]), courses).status).toBe('unmet')
-    expect(evaluateRule({ kind: 'credits', minimum: 5 }, profile([], { completedCredits: 5 }), courses).status).toBe('met')
-  })
-  it('requires recorded admission and an exactly matching cohort', () => {
-    expect(evaluateRule({ kind: 'program', programId: 'UTM:TEST' }, profile(), courses).status).toBe('unknown')
-    expect(evaluateRule({ kind: 'program', programId: 'UTM:TEST' }, profile([], { admittedPrograms: ['UTM:TEST'] }), courses).status).toBe('met')
-    const rule: Rule = { kind: 'applicability', cohort: '2026', rule: ref(A.code) }
-    expect(evaluateRule(rule, profile([A.id]), courses).status).toBe('unknown')
-    expect(evaluateRule(rule, profile([A.id], { cohort: '2025' }), courses).status).toBe('unknown')
-    expect(evaluateRule(rule, profile([A.id], { cohort: '2026' }), courses).status).toBe('met')
-  })
-  it('does not double count credits when completed records include an exclusion pair', () => {
-    const conflicting = course(A.code, { exclusions: req(ref(B.code), B.code) })
-    const all = [conflicting, B, C]
-    const student = profile([A.id, B.id, C.id])
-    expect(evaluateRule({ kind: 'credits', minimum: 1 }, student, all).status).toBe('unknown')
-    expect(evaluateRule({ kind: 'credits', minimum: 0.5 }, student, all).status).toBe('met')
-    expect(evaluateRule({ kind: 'credits', minimum: 1 }, { ...student, completedCredits: 1 }, all).status).toBe('met')
-    expect(evaluateRule({ kind: 'credits', minimum: 1, courseIds: [A.id, B.id] }, { ...student, completedCredits: 10 }, all).status).toBe('unknown')
-  })
-  it('keeps full campus identities distinct and accepts exact explicit external completions', () => {
-    const external: Rule = { kind: 'course', courseId: 'UTSG:TST100H1' }
-    expect(evaluateRule(external, profile([A.id]), courses).status).toBe('unmet')
-    expect(evaluateRule(external, profile(['UTSG:TST100H1']), courses).status).toBe('met')
-  })
 })
 
-describe('eligibility, relation traversal and independent hypothetical completion', () => {
-  it('combines mandatory concurrent, exclusion and permission conditions but not recommendations', () => {
-    const target = course(D.code, { prerequisites: req(ref(A.code)), corequisites: req(ref(B.code)), recommended: req(ref(C.code)) })
-    const student = profile([A.id], { courses: [{ courseId: A.id, status: 'completed' }, { courseId: B.id, status: 'inProgress' }] })
-    expect(evaluateEligibility(target, student, courses).status).toBe('met')
-    expect(evaluateEligibility(target, student, courses).recommended.status).toBe('unmet')
-    expect(evaluateEligibility({ ...target, exclusions: req(ref(A.code), A.code) }, student, courses).status).toBe('unmet')
-    expect(evaluateEligibility({ ...target, restrictions: req({ kind: 'permission', text: 'Instructor permission' }) }, student, courses).status).toBe('unknown')
-    expect(evaluateEligibility({ ...target, exclusions: req(ref(C.code), C.code) }, { ...student, recordComplete: false }, courses).status).toBe('unknown')
-  })
-  it('does not silently discard an unparsed exclusion with no course references', () => {
-    const target = course(D.code, { exclusions: req({ kind: 'unknown', text: 'Equivalent credit', reason: 'Cannot verify' }, 'Equivalent credit') })
-    expect(evaluateEligibility(target, profile(), courses).status).toBe('unknown')
-  })
-  it('terminates cycles, excludes the selected node from its neighborhood and retains external nodes', () => {
-    const cycle = [course(A.code, { prerequisites: req(ref(B.code)) }), course(B.code, { prerequisites: req({ kind: 'any', items: [ref(A.code), { kind: 'course', courseId: 'UTSG:TST100H1' }] }) }), C]
-    expect(findDependencyCycles(cycle)).toEqual([[A.id, B.id]])
-    expect(getRelatedCourses(A.id, cycle).transitivePrerequisites).toEqual([B.id, 'UTSG:TST100H1'].sort())
-    expect(getRelatedCourses(C.id, cycle).dependents).toEqual([])
-  })
-  it('does not confuse an OR participation edge with unconditional unlock', () => {
-    const target = course(D.code, { prerequisites: req({ kind: 'all', items: [{ kind: 'any', items: [ref(A.code), ref(B.code)] }, ref(C.code)] }) })
-    const all = [...courses.filter(c => c.id !== D.id), target]
-    const student = profile()
-    const saved = JSON.stringify(student)
-    expect(getPossibleUnlocks(A.id, all, student).newlyEligible).toEqual([])
-    expect(getPossibleUnlocks(A.id, all, student).potential).toContain(D.id)
-    expect(getPossibleUnlocks(A.id, all, profile([C.id])).newlyEligible).toContain(D.id)
-    expect(JSON.stringify(student)).toBe(saved)
-  })
-  it('counts simulated credits once and does not invent hypothetical grades', () => {
-    const target = course(D.code, { prerequisites: req({ kind: 'credits', minimum: 1 }) })
-    const graded = course(C.code, { prerequisites: req({ kind: 'minGrade', minimum: 70, courseId: A.id }) })
-    const all = [A, B, target, graded]
-    const student = profile([B.id], { completedCredits: 0.5 })
-    expect(getPossibleUnlocks(A.id, all, student).newlyEligible).toContain(D.id)
-    expect(getPossibleUnlocks(A.id, all, student).newlyEligible).not.toContain(C.id)
-    expect(student.completedCredits).toBe(0.5)
-    expect(getPossibleUnlocks(B.id, all, student).newlyEligible).toEqual([])
-    const excludesA = course(B.code, { exclusions: req(ref(A.code), A.code) })
-    expect(getPossibleUnlocks(A.id, [A, excludesA, target], student).newlyEligible).not.toContain(D.id)
-  })
-})
+// CJK punctuation, ideographs and full-width forms.
+const CJK = new RegExp(`[${[[0x3000, 0x303f], [0x3400, 0x9fff], [0xff00, 0xffef]].map(([a, b]) => `${String.fromCodePoint(a)}-${String.fromCodePoint(b)}`).join('')}]`, 'u')
 
-describe('program recommendations and completion', () => {
-  it('ranks direct requirements, options and prerequisite bridges deterministically', () => {
-    const option = course(C.code, { prerequisites: req(ref(B.code)) })
-    const all = [A, B, option, D]
-    const target = program({ kind: 'all', items: [ref(A.code), { kind: 'any', items: [ref(C.code), ref(D.code)] }] })
-    const recommendations = recommendCourses(target, catalog(all, [target]), profile())
-    expect(recommendations.map(r => r.courseId)).toEqual([A.id, D.id, C.id, B.id])
-    expect(recommendations.find(r => r.courseId === C.id)?.category).toBe('planning')
-    expect(recommendations.find(r => r.courseId === B.id)?.possibleUnlocks).toContain(C.id)
-  })
-  it('omits completed, planned, in-progress and excluded courses', () => {
-    const excluded = course(D.code, { exclusions: req(ref(A.code), A.code) })
-    const target = program({ kind: 'all', items: [ref(A.code), ref(B.code), ref(C.code), ref(D.code)] })
-    const student = profile([], { courses: [{ courseId: A.id, status: 'completed' }, { courseId: B.id, status: 'planned' }, { courseId: C.id, status: 'inProgress' }] })
-    expect(recommendCourses(target, catalog([A, B, C, excluded], [target]), student)).toEqual([])
-  })
-  it('shows unknown clause references only as planning candidates', () => {
-    const unknown = { ...req({ kind: 'unknown', text: 'Additional selection conditions', reason: 'Not parsed' }), courseIds: [A.id, B.id] }
-    const target = program(unknown.rule, { groups: [{ ...unknown, id: 'unknown', label: 'Unparsed group', category: 'completion' }] })
-    const recommendations = recommendCourses(target, catalog(courses, [target]), profile())
-    expect(recommendations).toHaveLength(2)
-    expect(recommendations.every(r => r.category === 'planning' && r.reasons[0].includes('不代表全部必修'))).toBe(true)
-    expect(evaluateProgram(target, profile([A.id, B.id]), courses).status).toBe('unknown')
-  })
-  it('does not infer completion from reusing credits across requirement groups', () => {
-    const creditRule: Rule = { kind: 'credits', minimum: 0.5, courseIds: [A.id] }
-    const target = program({ kind: 'all', items: [creditRule, creditRule] }, {
-      groups: ['one', 'two'].map(id => ({ ...req(creditRule), id, category: 'completion' as const, label: id })),
-    })
-    const checked = evaluateProgram(target, profile([A.id]), courses)
-    expect(checked.groups.every(g => g.evaluation.status === 'met')).toBe(true)
-    expect(checked.completion.status).toBe('unknown')
-  })
-  it('does not treat selected target program as recorded admission', () => {
-    const restricted = course(A.code, { restrictions: req({ kind: 'program', programId: 'UTM:TEST' }) })
-    const target = program(ref(A.code))
-    const data = catalog([restricted], [target])
-    expect(recommendCourses(target, data, profile())[0].category).toBe('planning')
-    expect(recommendCourses(target, data, profile([], { admittedPrograms: [target.id] }))[0].category).toBe('ready')
-  })
-})
-
-describe('private local profile imports', () => {
-  it('round-trips a schema-versioned profile and drops unrecognized data', () => {
-    const input = { ...profile([A.id], { cohort: '2026', completedCredits: 0.5 }), script: '<script>alert(1)</script>' }
-    const restored = parseStudentProfile(serializeStudentProfile(input))
-    expect(restored).toEqual(profile([A.id], { cohort: '2026', completedCredits: 0.5 }))
-    expect(restored).not.toHaveProperty('script')
-  })
-  it('rejects malformed data, duplicate IDs, bad grades and unsupported versions', () => {
-    expect(() => parseStudentProfile('{')).toThrow('JSON')
-    expect(() => parseStudentProfile({ ...profile(), schemaVersion: 2 })).toThrow('版本')
-    expect(() => parseStudentProfile(profile([A.id, A.id]))).toThrow('重复')
-    expect(() => parseStudentProfile(profile(['TST100H5']))).toThrow('校区')
-    expect(() => parseStudentProfile(profile([], { courses: [{ courseId: A.id, status: 'completed', grade: 101 }] }))).toThrow('成绩')
-    expect(() => parseStudentProfile({ ...profile(), completedCredits: Infinity })).toThrow('有限数值')
-    expect(() => parseStudentProfile({ ...profile(), recordComplete: 'true' })).toThrow('recordComplete')
-    expect(() => parseStudentProfile({ ...profile(), courses: [{ courseId: A.id, status: 'passed' }] })).toThrow('状态')
-  })
-  it('creates independent blank profiles with incomplete records', () => {
-    const one = createEmptyProfile(), two = createEmptyProfile()
-    one.courses.push({ courseId: A.id, status: 'completed' })
-    expect(two.courses).toEqual([])
-    expect(EMPTY_PROFILE.courses).toEqual([])
-    expect(two.recordComplete).toBe(false)
+describe('domain module hygiene', () => {
+  it('contains no hard-coded Chinese text (the UI owns every string)', () => {
+    const dir = join('src', 'domain')
+    for (const file of readdirSync(dir)) {
+      expect(readFileSync(join(dir, file), 'utf8').match(CJK), file).toBeNull()
+    }
   })
 })

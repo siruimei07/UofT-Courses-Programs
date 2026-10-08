@@ -1,5 +1,6 @@
+// Backend dataset contract (data/<campus>/catalog.json), shared with the pipeline, the data build
+// and the catalog validator. The frontend datasets in src/data/schema.ts are projections of it.
 export type Campus = 'UTM' | 'UTSG' | 'UTSC' | 'external'
-export type Status = 'met' | 'unmet' | 'unknown'
 export type Rule =
   | { kind: 'true' }
   | { kind: 'all' | 'any'; items: Rule[] }
@@ -53,7 +54,7 @@ export interface ProgramGroup extends Requirement {
 }
 export interface Program {
   id: string
-  campus: 'UTM'
+  campus: Campus
   code: string
   title: string
   type: string
@@ -69,7 +70,7 @@ export interface Program {
 export interface Catalog {
   schemaVersion: 1
   metadata: {
-    campus: 'UTM'
+    campus: Campus
     academicYear: string
     academicYearSource: string
     fetchedAt: string
@@ -79,32 +80,4 @@ export interface Catalog {
   }
   courses: Course[]
   programs: Program[]
-}
-export interface StudentCourse {
-  courseId: string
-  status: 'completed' | 'inProgress' | 'planned'
-  grade?: number
-}
-export interface StudentProfile {
-  schemaVersion: 1
-  courses: StudentCourse[]
-  recordComplete: boolean
-  completedCredits?: number
-  admittedPrograms: string[]
-  cohort?: string
-}
-export interface Evaluation {
-  status: Status
-  reasons: string[]
-  missing: string[]
-}
-export interface Recommendation {
-  courseId: string
-  score: number
-  category: 'ready' | 'planning'
-  reasons: string[]
-  groups: string[]
-  eligibility: Evaluation
-  possibleUnlocks: string[]
-  sourceUrls: string[]
 }

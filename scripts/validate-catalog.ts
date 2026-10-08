@@ -1,11 +1,16 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import type { Catalog, Requirement, Rule } from '../src/domain/types'
-import { ruleCourseIds } from '../src/domain/planner'
+import { ruleCourseIds } from '../src/domain/rules'
 
 const catalog = JSON.parse(readFileSync('data/utm/catalog.json', 'utf8')) as Catalog
 const validId = /^(UTM|UTSG|UTSC|external):[A-Z0-9]+$/
+const catalogIds = new Set(catalog.courses.map(course => course.id))
 const counters: Record<string, number> = {}
+/** Same-campus references that point at no course in this calendar (should become unresolvedIds). */
+const dangling = new Set<string>()
+let mentionedCount = 0
+let unresolvedCount = 0
 function ruleCheck(rule: Rule): void {
   assert.ok(rule && typeof rule.kind === 'string', 'Missing rule AST')
   counters[rule.kind] = (counters[rule.kind] || 0) + 1
@@ -30,14 +35,39 @@ function ruleCheck(rule: Rule): void {
     default: assert.fail(`Unsupported rule: ${JSON.stringify(rule)}`)
   }
 }
+function idList(ids: unknown, label: string): string[] {
+  assert.ok(Array.isArray(ids), `${label} must be an array`)
+  assert.equal(new Set(ids).size, ids.length, `Duplicated ${label} reference`)
+  ids.forEach(id => assert.match(id, validId))
+  return ids as string[]
+}
 function requirementCheck(req: Requirement): void {
   assert.equal(typeof req.rawText, 'string')
   assert.match(req.sourceUrl, /^https:\/\/utm\.calendar\.utoronto\.ca\//)
-  assert.ok(Array.isArray(req.courseIds))
-  assert.equal(new Set(req.courseIds).size, req.courseIds.length, 'Duplicated requirement reference')
-  req.courseIds.forEach(id => assert.match(id, validId))
+  idList(req.courseIds, 'courseIds')
   ruleCheck(req.rule)
-  ruleCourseIds(req.rule).forEach(id => assert.ok(req.courseIds.includes(id), `AST reference absent from source references: ${id}`))
+  const structured = ruleCourseIds(req.rule)
+  structured.forEach(id => assert.ok(req.courseIds.includes(id), `AST reference absent from source references: ${id}`))
+  req.courseIds.forEach(id => { if (id.startsWith('UTM:') && !catalogIds.has(id)) dangling.add(id) })
+  // Mentioned and unresolved codes are never requirements: the rule AST must not use them.
+  if (req.mentionedIds !== undefined) {
+    for (const id of idList(req.mentionedIds, 'mentionedIds')) {
+      assert.ok(!structured.includes(id), `Mentioned code used by the rule AST: ${id}`)
+      mentionedCount++
+    }
+  }
+  if (req.unresolvedIds !== undefined) {
+    for (const id of idList(req.unresolvedIds, 'unresolvedIds')) {
+      assert.ok(id.startsWith('UTM:'), `Unresolved code is not a same-campus code: ${id}`)
+      assert.ok(!catalogIds.has(id), `Unresolved code exists in the catalog: ${id}`)
+      assert.ok(!structured.includes(id), `Unresolved code used by the rule AST: ${id}`)
+      assert.ok(!req.courseIds.includes(id), `Unresolved code is also a graph reference: ${id}`)
+      unresolvedCount++
+    }
+  }
+}
+function optionalText(value: unknown, label: string): void {
+  if (value !== undefined) assert.equal(typeof value, 'string', `${label} must be text when present`)
 }
 
 assert.equal(catalog.schemaVersion, 1)
@@ -62,6 +92,9 @@ for (const course of catalog.courses) {
   assert.match(course.code, /^[A-Z]{3}\d{3}[HY]5$/)
   assert.equal(course.subject, course.code.slice(0, 3))
   assert.equal(course.credits, course.code.endsWith('Y5') ? 1 : 0.5)
+  for (const field of ['distribution', 'deliveryCampus', 'courseExperience', 'internationalComponent'] as const) {
+    optionalText(course[field], `${course.id} ${field}`)
+  }
   for (const field of ['prerequisites', 'corequisites', 'exclusions', 'recommended', 'restrictions'] as const) {
     requirementCheck(course[field])
   }
@@ -123,4 +156,7 @@ console.log(JSON.stringify({
   courses: catalog.courses.length,
   programs: catalog.programs.length,
   ruleNodes: counters,
+  mentionedReferences: mentionedCount,
+  unresolvedReferences: unresolvedCount,
+  danglingReferences: { count: dangling.size, sample: [...dangling].sort().slice(0, 10) },
 }, null, 2))
