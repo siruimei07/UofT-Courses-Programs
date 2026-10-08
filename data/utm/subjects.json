@@ -97,12 +97,12 @@
       "label": "Social Sciences"
     },
     {
-      "id": "humanities",
-      "label": "Humanities"
-    },
-    {
       "id": "professional",
       "label": "Management & Professional"
+    },
+    {
+      "id": "humanities",
+      "label": "Humanities"
     },
     {
       "id": "interdisciplinary",
