@@ -1,0 +1,709 @@
+/* Graph area overlays (design-spec 5, 6.5, 9, 10.3, 6.9.4). Colours come only from the tokens in
+   src/ui/tokens.css; sizes follow the spec. Stacking: canvas 0, sticky headers 1, scrollbars 2,
+   pills 3, tooltip 5, menus 20. */
+
+.gc-root {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  background: var(--surface);
+  color: var(--ink);
+  font-family: var(--font-ui);
+  font-size: 13px;
+  line-height: 1.4;
+  cursor: grab;
+  outline: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.gc-root:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: -2px;
+}
+
+.gc-canvas {
+  position: absolute;
+  left: 0;
+  top: 0;
+  z-index: 0;
+  display: block;
+  touch-action: none;
+}
+
+:where(.gc-root) button {
+  font: inherit;
+  color: inherit;
+}
+
+:where(.gc-root) button:focus:not(:focus-visible) {
+  outline: none;
+}
+
+:where(.gc-root) button:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+/* Shared bits ------------------------------------------------------------ */
+
+.gc-bullet {
+  flex: none;
+  display: inline-block;
+  height: 17px;
+  padding: 0 5px;
+  border-radius: 4px;
+  font-size: 11.5px;
+  font-weight: 700;
+  line-height: 17px;
+  letter-spacing: 0.01em;
+}
+
+.gc-counts {
+  display: inline-flex;
+  align-items: center;
+  vertical-align: top;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-variant-numeric: tabular-nums;
+}
+
+.gc-dot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  margin-right: 4px;
+  border-radius: 50%;
+}
+
+.gc-dot-pre {
+  background: var(--pre);
+}
+
+.gc-dot-unl {
+  background: var(--unl);
+}
+
+.gc-sep {
+  margin: 0 4px;
+  color: var(--ink-3);
+}
+
+.gc-sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* Corner (9.3) ----------------------------------------------------------- */
+
+.gc-corner {
+  position: absolute;
+  left: 0;
+  top: 0;
+  z-index: 1;
+  box-sizing: border-box;
+  width: 176px;
+  height: 60px;
+  padding: 12px 10px 0 14px;
+  background: var(--surface);
+  border-right: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  cursor: default;
+}
+
+.gc-corner-title {
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 17px;
+  color: var(--ink-2);
+}
+
+.gc-corner-meta {
+  overflow: hidden;
+  font-size: 12px;
+  line-height: 16px;
+  color: var(--ink-3);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Lane column (9.1) ------------------------------------------------------ */
+
+.gc-lanes {
+  position: absolute;
+  left: 0;
+  top: 60px;
+  bottom: 0;
+  z-index: 1;
+  box-sizing: border-box;
+  width: 176px;
+  overflow: hidden;
+  background: var(--surface);
+  border-right: 1px solid var(--line);
+  cursor: default;
+}
+
+.gc-lane {
+  position: absolute;
+  left: 0;
+  top: 0;
+  box-sizing: border-box;
+  width: 100%;
+  border-bottom: 1px solid var(--line);
+}
+
+.gc-lane:hover {
+  background: var(--hover);
+}
+
+.gc-lane.is-division-start::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: -1px;
+  height: 1.5px;
+  background: var(--rule-strong);
+}
+
+.gc-lane-bar {
+  position: absolute;
+  left: 14px;
+  top: 10px;
+  bottom: 10px;
+  width: 3px;
+  border-radius: 2px;
+}
+
+.gc-lane-label {
+  position: absolute;
+  left: 26px;
+  right: 10px;
+  top: 0;
+}
+
+.gc-lane-label[data-mode="hidden"] {
+  display: none;
+}
+
+.gc-lane-division {
+  height: 17px;
+  overflow: hidden;
+  font-size: 11.5px;
+  font-weight: 600;
+  line-height: 17px;
+  color: var(--ink-3);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.gc-lane-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 17px;
+}
+
+.gc-lane-head .gc-bullet {
+  display: none;
+}
+
+.gc-lane-name {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 17px;
+  color: var(--ink);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.gc-lane-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 17px;
+  margin-top: 2px;
+  overflow: hidden;
+  font-size: 12px;
+  line-height: 17px;
+  color: var(--ink-2);
+  white-space: nowrap;
+}
+
+.gc-lane-label[data-mode="plain"] .gc-lane-division,
+.gc-lane-label[data-mode="single"] .gc-lane-division,
+.gc-lane-label[data-mode="single"] .gc-lane-meta {
+  display: none;
+}
+
+.gc-lane-label[data-mode="single"] .gc-lane-head .gc-bullet {
+  display: inline-block;
+}
+
+/* During a selection "● 1 needed · ● 40 unlocked" needs the whole 140 px meta line, so the
+   bullet steps aside (the lane bar keeps the division tone, the name keeps the code in its title). */
+.gc-lane-label[data-counts] {
+  right: 6px;
+}
+
+.gc-lane-label[data-counts] .gc-lane-meta .gc-bullet {
+  display: none;
+}
+
+.gc-lane-label[data-counts] .gc-dot {
+  margin-right: 3px;
+}
+
+.gc-lane-label[data-counts] .gc-sep {
+  margin: 0 3px;
+}
+
+.gc-counts-short,
+.gc-lane-label[data-compact] .gc-counts-long {
+  display: none;
+}
+
+.gc-lane-label[data-compact] .gc-counts-short {
+  display: inline-flex;
+}
+
+.gc-lane.is-slim .gc-lane-name {
+  color: var(--ink-3);
+  font-weight: 400;
+}
+
+.gc-lane-kebab {
+  position: absolute;
+  right: -6px;
+  bottom: -3px;
+  display: none;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--surface);
+  cursor: pointer;
+}
+
+.gc-lane-kebab svg {
+  fill: var(--ink-2);
+}
+
+.gc-lane:hover .gc-lane-kebab,
+.gc-lane-kebab:focus-visible,
+.gc-lane-kebab[aria-expanded="true"] {
+  display: grid;
+}
+
+.gc-lane-kebab:hover {
+  background: var(--hover);
+}
+
+.gc-lane-marker {
+  position: absolute;
+  right: 0;
+  top: 0;
+  width: 0;
+  height: 0;
+  border-top: 4px solid transparent;
+  border-bottom: 4px solid transparent;
+  border-left: 6px solid var(--sel);
+  pointer-events: none;
+}
+
+.gc-lane-menu {
+  position: absolute;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  min-width: 190px;
+  padding: 4px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  box-shadow: var(--shadow-pop);
+  cursor: default;
+}
+
+.gc-lane-menu button {
+  height: 32px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  font-size: 13px;
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.gc-lane-menu button:hover,
+.gc-lane-menu button:focus-visible {
+  background: var(--hover);
+}
+
+.gc-lane-menu button:focus-visible {
+  outline-offset: -2px;
+}
+
+/* Band bar (9.2) --------------------------------------------------------- */
+
+.gc-bands {
+  position: absolute;
+  left: 176px;
+  top: 0;
+  right: 0;
+  z-index: 1;
+  box-sizing: border-box;
+  height: 60px;
+  overflow: hidden;
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+  cursor: default;
+}
+
+.gc-band-layer {
+  position: absolute;
+  left: 0;
+  top: 0;
+  height: 100%;
+}
+
+.gc-band {
+  position: absolute;
+  top: 0;
+  height: 60px;
+}
+
+.gc-band.is-odd {
+  background: var(--band);
+}
+
+.gc-band-label {
+  position: absolute;
+  left: 0;
+  top: 12px;
+  white-space: nowrap;
+}
+
+.gc-band-long,
+.gc-band-short {
+  width: max-content;
+}
+
+.gc-band-short {
+  position: absolute;
+  left: 0;
+  top: 0;
+  visibility: hidden;
+}
+
+.gc-band-label[data-mode="short"] .gc-band-long,
+.gc-band-label[data-mode="title"] .gc-band-long {
+  visibility: hidden;
+}
+
+.gc-band-label[data-mode="short"] .gc-band-short,
+.gc-band-label[data-mode="title"] .gc-band-short {
+  visibility: visible;
+}
+
+.gc-band-label[data-mode="title"] .gc-band-short .gc-band-meta {
+  visibility: hidden;
+}
+
+.gc-band-title {
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 17px;
+  color: var(--ink);
+}
+
+.gc-band-meta {
+  font-size: 12px;
+  line-height: 17px;
+  color: var(--ink-3);
+  font-variant-numeric: tabular-nums;
+}
+
+.gc-scale {
+  position: absolute;
+  left: 0;
+  top: 51px;
+  height: 3px;
+}
+
+.gc-seg {
+  position: absolute;
+  top: 0;
+  box-sizing: border-box;
+  height: 3px;
+  border: 1px solid var(--ink);
+}
+
+.gc-seg.is-filled {
+  background: var(--ink);
+}
+
+.gc-seg.is-mini {
+  opacity: 0.5;
+}
+
+.gc-notch {
+  position: absolute;
+  top: -6px;
+  width: 1px;
+  height: 5px;
+  background: var(--ink);
+}
+
+.gc-band-marker {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  width: 0;
+  height: 0;
+  border-left: 4px solid transparent;
+  border-right: 4px solid transparent;
+  border-top: 6px solid var(--sel);
+  pointer-events: none;
+}
+
+/* Scrollbars and overview ruler (9.4) ------------------------------------ */
+
+.gc-vscroll,
+.gc-hscroll {
+  position: absolute;
+  z-index: 2;
+  cursor: default;
+}
+
+.gc-vscroll {
+  right: 0;
+  top: 60px;
+  bottom: 12px;
+}
+
+.gc-hscroll {
+  left: 176px;
+  right: 12px;
+  bottom: 0;
+}
+
+.gc-thumb {
+  position: absolute;
+  left: 0;
+  top: 0;
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--ink) 22%, transparent);
+  cursor: default;
+}
+
+.gc-vscroll .gc-thumb {
+  left: 1px;
+  width: 8px;
+}
+
+.gc-hscroll .gc-thumb {
+  top: 1px;
+  height: 8px;
+}
+
+.gc-thumb:hover,
+.gc-thumb[data-dragging="true"] {
+  background: color-mix(in srgb, var(--ink) 38%, transparent);
+}
+
+.gc-mark {
+  position: absolute;
+  cursor: pointer;
+}
+
+.gc-vscroll .gc-mark {
+  left: 0;
+  right: 0;
+  height: 3px;
+  margin-top: -1.5px;
+}
+
+.gc-vscroll .gc-mark-division {
+  height: 2px;
+  margin-top: -1px;
+  cursor: default;
+}
+
+.gc-mark-pre {
+  background: var(--pre);
+}
+
+.gc-mark-unl {
+  background: var(--unl);
+}
+
+.gc-mark-both {
+  background: linear-gradient(to right, var(--pre) 50%, var(--unl) 50%);
+}
+
+.gc-mark-prog {
+  background: var(--prog-ring);
+}
+
+.gc-hscroll .gc-mark-band {
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  margin-left: -1px;
+  background: var(--rule-strong);
+  cursor: default;
+}
+
+/* Edge-of-view pills (10.3) ---------------------------------------------- */
+
+.gc-pill {
+  position: absolute;
+  left: 0;
+  top: 0;
+  z-index: 3;
+  box-sizing: border-box;
+  height: 24px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface);
+  box-shadow: var(--shadow-pill);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 22px;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+}
+
+.gc-root .gc-pill[data-kind="pre"] {
+  color: var(--pre-ink);
+}
+
+.gc-root .gc-pill[data-kind="unl"] {
+  color: var(--unl-ink);
+}
+
+.gc-root .gc-pill[data-kind="prog"] {
+  color: var(--prog);
+}
+
+.gc-pill:hover {
+  background: var(--hover);
+}
+
+/* Tooltip (6.9.4) -------------------------------------------------------- */
+
+.gc-tooltip {
+  position: absolute;
+  left: 0;
+  top: 0;
+  z-index: 5;
+  box-sizing: border-box;
+  max-width: 340px;
+  padding: 9px 11px 10px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--surface);
+  box-shadow: var(--shadow-pop);
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--ink-2);
+  pointer-events: none;
+}
+
+.gc-tip-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.gc-tip-code {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--ink);
+}
+
+.gc-tip-record {
+  color: var(--ink-3);
+}
+
+.gc-tip-title {
+  margin-top: 1px;
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--ink);
+}
+
+.gc-tip-rel {
+  margin-top: 4px;
+  font-weight: 600;
+}
+
+.gc-tone-pre {
+  color: var(--pre-ink);
+}
+
+.gc-tone-unl {
+  color: var(--unl-ink);
+}
+
+.gc-tone-prog {
+  color: var(--prog);
+}
+
+.gc-tone-none {
+  color: var(--ink-3);
+}
+
+.gc-tone-focus {
+  color: var(--ink);
+}
+
+.gc-tip-req {
+  display: -webkit-box;
+  margin-top: 4px;
+  overflow: hidden;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+  -webkit-box-orient: vertical;
+}
+
+.gc-tip-label {
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.gc-tip-text {
+  color: var(--ink);
+}
+
+/* Forced colours (12, SHOULD): system colours for the DOM overlays. */
+@media (forced-colors: active) {
+  .gc-thumb,
+  .gc-seg.is-filled,
+  .gc-notch {
+    background: CanvasText;
+  }
+
+  .gc-lane-marker {
+    border-left-color: Highlight;
+  }
+
+  .gc-band-marker {
+    border-top-color: Highlight;
+  }
+}
