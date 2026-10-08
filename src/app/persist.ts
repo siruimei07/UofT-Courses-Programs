@@ -88,7 +88,12 @@ export function parsePrefs(value: unknown): Partial<AppState> {
   return result
 }
 
-/** Validates an imported or stored record; throws with a readable message on bad input. */
+/**
+ * Validates an imported or stored record; throws with a readable message on bad input. The panels
+ * map these messages by their exact text (src/ui/panels/record.ts mapImportError):
+ *   'Record must be a JSON object' | 'Unsupported record format' | 'Invalid course id: <id>' |
+ *   'Duplicate course id: <id>' | 'Invalid status for <id>' | 'Invalid grade for <id>'
+ */
 export function parseRecord(value: unknown): Map<string, RecordEntry> {
   if (!value || typeof value !== 'object') throw new Error('Record must be a JSON object')
   const stored = value as Partial<StoredRecord>
@@ -96,6 +101,8 @@ export function parseRecord(value: unknown): Map<string, RecordEntry> {
   const record = new Map<string, RecordEntry>()
   for (const item of stored.courses) {
     if (!item || typeof item.id !== 'string' || !COURSE_ID.test(item.id)) throw new Error(`Invalid course id: ${String(item?.id)}`)
+    // One entry per course: a repeated id is ambiguous (which status or grade wins?), so refuse it.
+    if (record.has(item.id)) throw new Error(`Duplicate course id: ${item.id}`)
     const status = pickEnum(item.status, STATUSES)
     if (!status) throw new Error(`Invalid status for ${item.id}`)
     const entry: RecordEntry = { status }

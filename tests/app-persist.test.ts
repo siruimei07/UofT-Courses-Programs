@@ -42,6 +42,27 @@ describe('parseRecord / serializeRecord', () => {
     expect(() => parseRecord({ schemaVersion: 1, courses: [{ id: 'UTM:CSC108H5', status: 'done' }] })).toThrow('Invalid status')
     expect(() => parseRecord({ schemaVersion: 1, courses: [{ id: 'UTM:CSC108H5', status: 'completed', grade: 101 }] })).toThrow('Invalid grade')
   })
+
+  it('rejects a course listed twice, naming it (the panels map this exact text)', () => {
+    const twice = (second: object) => () => parseRecord({ schemaVersion: 1, courses: [
+      { id: 'UTM:CSC108H5', status: 'completed', grade: 42 },
+      { id: 'UTM:MAT102H5', status: 'planned' },
+      { id: 'UTM:CSC108H5', ...second },
+    ] })
+    // Identical rows and conflicting ones alike: which status or grade would win is ambiguous.
+    expect(twice({ status: 'completed', grade: 42 })).toThrow(new Error('Duplicate course id: UTM:CSC108H5'))
+    expect(twice({ status: 'inProgress' })).toThrow(new Error('Duplicate course id: UTM:CSC108H5'))
+    // The existing messages are unchanged and still come first for a bad row.
+    expect(twice({ status: 'done' })).toThrow(new Error('Duplicate course id: UTM:CSC108H5'))
+    expect(() => parseRecord({ schemaVersion: 1, courses: [{ id: 'UTM:CSC108H5', status: 'done' }, { id: 'UTM:CSC108H5', status: 'planned' }] }))
+      .toThrow(new Error('Invalid status for UTM:CSC108H5'))
+    // Ids differing only by the campus digit are different courses.
+    expect(parseRecord({ schemaVersion: 1, courses: [{ id: 'UTM:CSC108H5', status: 'planned' }, { id: 'UTSG:CSC108H1', status: 'planned' }] }).size).toBe(2)
+  })
+
+  it('a serialized record never trips the duplicate check', () => {
+    expect(() => parseRecord(serializeRecord(new Map([['UTM:CSC108H5', { status: 'completed' as const }]])))).not.toThrow()
+  })
 })
 
 describe('startPersistence', () => {
@@ -93,6 +114,14 @@ describe('startPersistence', () => {
 
   it('ignores a corrupt stored record', () => {
     storage.setItem(RECORD_KEY, '{"schemaVersion":1,"courses":[{"id":"bad"}]}')
+    stop = startPersistence()
+    expect(appStore.get().record.size).toBe(0)
+  })
+
+  it('ignores a stored record that lists a course twice', () => {
+    storage.setItem(RECORD_KEY, JSON.stringify({ schemaVersion: 1, courses: [
+      { id: 'UTM:CSC108H5', status: 'completed' }, { id: 'UTM:CSC108H5', status: 'planned' },
+    ] }))
     stop = startPersistence()
     expect(appStore.get().record.size).toBe(0)
   })

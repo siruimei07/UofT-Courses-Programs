@@ -21,7 +21,9 @@ import { subjectTones } from '../ui/SubjectBullet'
 import { Toolbar } from '../ui/Toolbar'
 import { usePopover } from '../ui/usePopover'
 import { decideLanding, type Landing } from './landing'
+import { usePanelMotion } from './panelMotion'
 import { computeReadout, shownCounts } from './readout'
+import { hasPassedCourse } from './record'
 import { buildCourseIndex, buildProgramIndex, programShortTitle } from './search'
 import { actions, appStore, createStore, useApp } from './store'
 import { useResolvedTheme } from './theme'
@@ -335,7 +337,8 @@ function Workspace({ registry, campus, dataset, breakpoint, notice }: WorkspaceP
 
   // Card head.
   const shown = useMemo(() => shownCounts(topology, presentation), [topology, presentation])
-  const hasCompleted = useMemo(() => [...record.values()].some(entry => entry.status === 'completed'), [record])
+  // A failed course is drawn as not taken, so "Hide completed" cannot hide it.
+  const hasCompleted = useMemo(() => hasPassedCourse(record), [record])
   const meta = cardMeta({
     subjects: topology.lanes.length,
     courses: topology.nodes.length,
@@ -385,6 +388,11 @@ function Workspace({ registry, campus, dataset, breakpoint, notice }: WorkspaceP
 
   const legendMode = focusIndex >= 0 ? 'chain' : programIds ? 'program' : 'overview'
 
+  // Panel expand / collapse animates the column; the canvas resizes once at the end (17).
+  const panelColRef = useRef<HTMLDivElement>(null)
+  const stageRef = useRef<HTMLDivElement>(null)
+  usePanelMotion(panelColRef, stageRef, panelCollapsed)
+
   return (
     <Shell
       breakpoint={breakpoint} notice={notice} registry={registry} campus={campus} dataset={dataset} search={search} programTitle={programTitle}
@@ -421,21 +429,24 @@ function Workspace({ registry, campus, dataset, breakpoint, notice }: WorkspaceP
           onFit={() => canvasRef.current?.fitWidth()}
         />
         <div className="graph-area" id="graph-area" tabIndex={-1}>
-          <GraphCanvas
-            ref={canvasRef}
-            dataset={dataset}
-            topology={topology}
-            presentation={presentation}
-            geometry={geometry}
-            routes={routes}
-            measure={measure}
-            theme={theme}
-            selectedId={focusIndex >= 0 ? focusId : null}
-            programActive={programIds !== null}
-            onSelect={onSelect}
-            onZoomChange={onZoomChange}
-            onPlotSize={onPlotSize}
-          />
+          <div className="graph-stage" ref={stageRef}>
+            <GraphCanvas
+              ref={canvasRef}
+              dataset={dataset}
+              topology={topology}
+              presentation={presentation}
+              geometry={geometry}
+              routes={routes}
+              measure={measure}
+              theme={theme}
+              selectedId={focusIndex >= 0 ? focusId : null}
+              programActive={programIds !== null}
+              motion={true}
+              onSelect={onSelect}
+              onZoomChange={onZoomChange}
+              onPlotSize={onPlotSize}
+            />
+          </div>
         </div>
         <LegendStrip
           mode={legendMode}
@@ -444,7 +455,7 @@ function Workspace({ registry, campus, dataset, breakpoint, notice }: WorkspaceP
           unrelatedHidden={hideUnrelated && presentation.dimming}
         />
       </section>
-      <div className="panel-col" data-collapsed={panelCollapsed || undefined}>
+      <div className="panel-col" ref={panelColRef} data-collapsed={panelCollapsed || undefined}>
         <RightPanel {...panelProps} />
       </div>
     </Shell>

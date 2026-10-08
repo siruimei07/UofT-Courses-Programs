@@ -140,6 +140,9 @@
 
   --edge-faint: #404a56;
   --edge-hover: #7b8592;
+  /* Program links at the weight of the soft chain links (4.8:1): the full --prog amber made program
+     mode a glaring web on the dark surface (visual QA). Dots, rings and text keep --prog. */
+  --edge-program: #b07d3c;
 
   --lane-sciences-1: #3fb7c2;       --lane-sciences-2: #2a8e98;
   --lane-social-sciences-1: #f07285; --lane-social-sciences-2: #d45d6c;
@@ -197,6 +200,7 @@
 
     --edge-faint: #404a56;
     --edge-hover: #7b8592;
+    --edge-program: #b07d3c;
 
     --lane-sciences-1: #3fb7c2;       --lane-sciences-2: #2a8e98;
     --lane-social-sciences-1: #f07285; --lane-social-sciences-2: #d45d6c;

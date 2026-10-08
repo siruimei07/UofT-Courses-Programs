@@ -1,5 +1,6 @@
 // The graph pipeline for the current app state, memoised stage by stage (design-spec 16.1):
-//   record → eligibility → presentation + geometry (chain titles auto, 8.2) → routes.
+//   record → statuses (a failed course counts as not taken) + eligibility (memo shared with the
+//   panels) → presentation + geometry (chain titles auto, 8.2) → routes.
 // Topology, engine and the label measurer are built by the caller once per dataset.
 import { useMemo } from 'react'
 import type { GraphCourse, GraphDataset } from '../data/schema'
@@ -7,9 +8,10 @@ import type { CourseEngine } from '../domain/engine-types'
 import type { PlotSize } from '../graph/canvas-types'
 import { computeRoutes } from '../graph/routes'
 import type { LabelMeasurer } from '../graph/text'
-import type { Eligibility, Geometry, Presentation, RecordStatus, Routes, Topology } from '../graph/types'
+import type { Eligibility, Geometry, Presentation, Routes, Topology } from '../graph/types'
 import { chainTitlesAuto, resolveChainTitles, type ChainTitles, type ChainTitlesBase } from './chainTitles'
 import { anyGroupsOf } from './readout'
+import { presentationRecord, recordEligibility } from './record'
 import { useApp } from './store'
 
 export interface GraphModel {
@@ -46,12 +48,10 @@ export function useGraphModel(
   const subjects = useApp(state => state.subjects)
   const record = useApp(state => state.record)
 
-  const statuses = useMemo(() => {
-    const map = new Map<string, RecordStatus>()
-    for (const [id, entry] of record) map.set(id, entry.status)
-    return map
-  }, [record])
-  const eligibility = useMemo(() => (record.size ? engine.eligibility(record) : null), [engine, record])
+  // A failed course is drawn as not taken; eligibility is shared with the panels (one engine pass
+  // per record change).
+  const statuses = useMemo(() => presentationRecord(record), [record])
+  const eligibility = useMemo(() => recordEligibility(engine, record), [engine, record])
 
   const base = useMemo<ChainTitlesBase>(() => ({
     focusId, depth, hideUnrelated, hideCompleted, showAllEdges, levels, subjects, programIds,
