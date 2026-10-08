@@ -5,6 +5,7 @@ import type { GraphDataset } from '../src/data/schema'
 import type { Topology } from '../src/graph'
 import { loadGraphDataset, syntheticDataset } from './helpers/dataset'
 import { bestOf } from './helpers/graph'
+import { budget } from './helpers/perf'
 
 const { dataset, source } = loadGraphDataset()
 const { result: topology, ms: topologyMs } = bestOf(3, () => buildTopology(dataset))
@@ -52,7 +53,7 @@ function shuffled<T>(items: readonly T[], seed: number): T[] {
 describe('topology on the real UTM dataset', () => {
   it(`builds within the 150 ms budget (${source} data)`, () => {
     console.log(`[graph] buildTopology: ${topologyMs.toFixed(1)} ms for ${topology.nodes.length} courses / ${topology.edges.length} edges / ${topology.excludedEdges.length} excluded`)
-    expect(topologyMs).toBeLessThan(150)
+    expect(topologyMs).toBeLessThan(budget(150))
   })
 
   it('places every course exactly once in nodes, lanes and cells', () => {

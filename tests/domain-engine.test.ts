@@ -5,6 +5,7 @@ import type { GraphCourse, GraphDataset, ProgramGroupLite, ProgramLite, Requirem
 import { createEngine, NEXT_COURSES_LIMIT, ruleCourseIds } from '../src/domain'
 import type { RecordEntryLike, Rule } from '../src/domain'
 import { loadGraphDataset } from './helpers/dataset'
+import { budget } from './helpers/perf'
 
 const id = (code: string) => (code.includes(':') ? code : `UTM:${code}`)
 const course = (code: string): Rule => ({ kind: 'course', courseId: id(code) })
@@ -484,12 +485,12 @@ describe('whole-catalog performance', () => {
     }
     times.sort((a, b) => a - b)
     expect(size).toBe(real.courses.length - taken.length - 2)
-    expect(times[2]).toBeLessThan(50)
+    expect(times[2]).toBeLessThan(budget(50))
   })
 
   it('builds the indexes once in well under a frame budget', () => {
     const start = performance.now()
     createEngine(real)
-    expect(performance.now() - start).toBeLessThan(100)
+    expect(performance.now() - start).toBeLessThan(budget(100))
   })
 })

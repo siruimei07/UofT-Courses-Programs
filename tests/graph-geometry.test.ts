@@ -5,6 +5,7 @@ import {
 import type { DisplayClass, Geometry, GeometryOptions, LabelMeasure, NodeRole, Presentation, PresentationInput, Topology } from '../src/graph'
 import { loadGraphDataset, presentationInput, syntheticDataset } from './helpers/dataset'
 import { bestOf, overlappingPairs, stubFocusLines, stubMeasure } from './helpers/graph'
+import { budget } from './helpers/perf'
 
 const opt = DEFAULT_GEOMETRY_OPTIONS
 const topology = buildTopology(loadGraphDataset().dataset)
@@ -315,7 +316,7 @@ describe('geometry on the real UTM dataset', () => {
       return { name, ms }
     })
     for (const { name, ms } of rows) console.log(`[graph] presentation + geometry (${name}): ${ms.toFixed(2)} ms`)
-    for (const { ms } of rows) expect(ms).toBeLessThan(40)
+    for (const { ms } of rows) expect(ms).toBeLessThan(budget(40))
   })
 
   it('is deterministic', () => {

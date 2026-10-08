@@ -5,5 +5,6 @@ export default defineConfig({
   plugins: [react()],
   base: process.env.BASE_PATH || '/',
   build: { chunkSizeWarningLimit: 650 },
-  test: { include: ['tests/**/*.test.ts'], environment: 'node' },
+  // Real-data sweeps take seconds locally and longer on shared CI runners.
+  test: { include: ['tests/**/*.test.ts'], environment: 'node', testTimeout: 120_000, hookTimeout: 120_000 },
 })

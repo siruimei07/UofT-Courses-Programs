@@ -13,6 +13,7 @@ import {
   anyGroupsFor, bestOf, coincidentRuns, containmentProblems, facingStubs, lastPoint, laterTrackReaches, obstacleBoxes, otherTrackCrossings, pathEnds,
   pathIntrusions, stubFocusLines, stubMeasure, wrappedMerges,
 } from './helpers/graph'
+import { budget } from './helpers/perf'
 
 const { dataset } = loadGraphDataset()
 const topology = buildTopology(dataset)
@@ -356,7 +357,7 @@ describe('routes on the real UTM dataset (design-spec 16.2)', () => {
     for (const [name, s] of rows) {
       const edges = s.routes.paths.filter(path => path.edge >= 0).length
       console.log(`[graph] routes (${name}): ${s.ms.toFixed(2)} ms for ${edges} edges / ${s.routes.paths.length} paths, ${s.routes.fallbacks} fallbacks`)
-      if (edges <= 400) expect(s.ms).toBeLessThan(30)
+      if (edges <= 400) expect(s.ms).toBeLessThan(budget(30))
       const again = computeRoutes(s.topo, s.presentation, s.geometry, { anyGroups: s.focus >= 0 ? anyGroupsFor(dataset, topology, s.focus) : [] })
       expect(again).toEqual(s.routes)
     }
