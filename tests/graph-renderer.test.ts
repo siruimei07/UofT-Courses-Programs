@@ -1,9 +1,12 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { buildTopology, computeGeometry, computePresentation, computeRoutes, dotRadius, plainEdgePaths, plainEdgeStubs, samplePath } from '../src/graph'
+import {
+  buildTopology, classifyOverviewEdge, computeGeometry, computePresentation, computeRoutes, dotRadius, geometryOptions, innerTrackEnds, plainEdgeBlocked,
+  plainEdgePaths, plainEdgeStubs, routedEdgePaths, samplePath,
+} from '../src/graph'
 import type { DisplayClass, Geometry, NodeRole, PathSegment, Presentation, PresentationInput, RecordStatus } from '../src/graph'
 import {
-  RENDER, buildScene, drawScene, hoverEdges, interpolateGeometry, isLongEdge, nodeStyle, routeWidth, separatorLine,
-  type EdgeDraw, type FrameState, type Scene, type SceneInput,
+  RENDER, buildScene, drawScene, hoverEdges, interpolateGeometry, isLongEdge, nodeStyle, overlayGeometry, overlayRowsChange, routeWidth,
+  separatorLine, tweenScene, type EdgeDraw, type FrameState, type Scene, type SceneInput,
 } from '../src/graph/renderer'
 import { bandCounts, chainLaneCount, laneCounts } from '../src/graph/overlays/counts'
 import { pillText, placePills } from '../src/graph/overlays/EdgePills'
@@ -15,7 +18,7 @@ import { forcedTokens, type RenderTokens } from '../src/graph/tokens'
 import { laneTone } from '../src/graph/topology'
 import { subjectTones } from '../src/ui/SubjectBullet'
 import { loadGraphDataset, presentationInput } from './helpers/dataset'
-import { anyGroupsFor, stubMeasure } from './helpers/graph'
+import { anyGroupsFor, facingStubs, obstacleBoxes, otherTrackCrossings, pathIntrusions, stubMeasure } from './helpers/graph'
 
 const { dataset } = loadGraphDataset()
 const topology = buildTopology(dataset)
@@ -208,109 +211,274 @@ describe('node styles (design-spec 7.1-7.3)', () => {
     expect(out[3].rings).toEqual([{ r: 3.75 + 3.5, width: 1.5, color: '#nodeAvailable' }])
     expect(out[4].rings.map(r => r.r)).toEqual([4.25 + 3.5, 4.25 + 6.5])
   })
+
+  it('keeps the record active when it holds only failed attempts (drawn as not taken, still evaluated)', () => {
+    // A failed course is left out of `presentation.record` (app-shell), but the engine still
+    // evaluated the record: "available" rings (the retake of the failed course among them) apply.
+    const eligibility = new Map([['UTM:CSC108H5', 'met' as const], ['UTM:CSC148H5', 'unmet' as const]])
+    const { scene, presentation } = model({ eligibility })
+    expect(presentation.record.every(r => r === null)).toBe(true)
+    expect(scene.recordActive).toBe(true)
+    expect(scene.nodes[idx('CSC108H5')].rings.map(r => r.color)).toEqual(['#nodeAvailable'])
+    expect(scene.nodes[idx('CSC148H5')].rings).toEqual([])
+    expect(model().scene.recordActive).toBe(false)
+  })
 })
 
-/**
- * Stub halves per long edge. A half is missing only where a dense wrapped cell left its anchor
- * without a free row-gap slot (PlainEdgeOptions.truncateUnplaced): the source half starts on its
- * source's row, the target half at its terminal dot 10 px before the entry.
- */
-function stubHalves(scene: Scene, geometry: Geometry): Map<number, { source?: EdgeDraw; target?: EdgeDraw }> {
+/** Stub halves per stubbed edge, as the scene drew them (a half is empty where graph-core drew nothing at that end). */
+function stubHalves(scene: Scene): Map<number, { source?: EdgeDraw; target?: EdgeDraw }> {
   const halves = new Map<number, { source?: EdgeDraw; target?: EdgeDraw }>()
   for (const d of scene.stubs) {
-    const { from } = topology.edges[d.edge]
     const entry = halves.get(d.edge) ?? {}
-    const onSourceRow = Math.abs(d.segs[0].y - geometry.nodes[from].cy) < 1e-9 && d.segs[0].x <= geometry.nodes[from].x + geometry.nodes[from].w + 20
-    if (onSourceRow && !entry.source) entry.source = d
+    if (d.half === 'source') entry.source = d
     else entry.target = d
     halves.set(d.edge, entry)
   }
   return halves
 }
 
-describe('faint edges, stubs and hover previews (design-spec 8.7, 8.10)', () => {
-  const overview = model()
+/** Left edge of track k of a column (world px). */
+const trackLeftOf = (geometry: Geometry, col: number, k: number) => {
+  const column = geometry.columns[col]
+  return column.x + k * (column.trackW + geometryOptions(geometry).trackGap)
+}
 
-  it('stubs exactly the long overview edges: 3+ visible lanes apart or more than 320 px apart vertically', () => {
-    const { scene, presentation, geometry } = overview
-    const faint = scene.faint.flatMap(group => group.edges)
-    const stubbed = new Set(scene.stubs.map(d => d.edge))
-    // Every stub half ends in a terminal dot (cut faint edges add theirs too).
-    expect(scene.stubDots.length).toBeGreaterThanOrEqual(scene.stubs.length)
-    // Halves are missing only in dense wrapped cells: a handful at most.
-    expect(2 * stubbed.size - scene.stubs.length).toBeLessThan(0.01 * scene.stubs.length)
+/** Every faint stroke of a scene (full edges and stub halves) with its layout edge. */
+const faintItems = (scene: Scene) => [...scene.faint.flatMap(group => group.edges), ...scene.stubs].map(d => ({ edge: d.edge, segments: d.segs }))
+
+/**
+ * Product rule, wrapped tracks (19.11), on the drawn scene: no faint stroke or terminal dot lies in
+ * another track of a wrapped column of either end, inside that end's lane, and no two stubs of
+ * different courses face each other on one row closer than 6 px.
+ */
+function wrappedTrackViolations(scene: Scene): string[] {
+  const { geometry, topology: topo } = scene.input
+  const problems: string[] = [...otherTrackCrossings(topo, geometry, faintItems(scene))]
+  // Terminal dots (r 1.5) of every stub half: inside the x-range of a track other than their own
+  // node's, within that node's lane, they would read as a tick towards a neighbour in the column.
+  const terminal = RENDER.stub.terminal
+  for (const d of scene.stubs) {
+    const { from, to } = topo.edges[d.edge]
+    const v = d.half === 'source' ? from : to
+    const dot = d.half === 'source' ? d.segs[d.segs.length - 1] : d.segs[0]
+    const node = topo.nodes[v]
+    const column = geometry.columns[node.col]
+    const lane = geometry.lanes[node.lane]
+    if (column.tracks < 2 || dot.y < lane.y || dot.y > lane.y + lane.h) continue
+    for (let k = 0; k < column.tracks; k++) {
+      if (k === geometry.nodes[v].track) continue
+      const left = trackLeftOf(geometry, node.col, k)
+      if (dot.x + terminal > left + 1e-9 && dot.x - terminal < left + column.trackW - 1e-9) {
+        problems.push(`${node.code}'s ${d.half} stub dot sits in track ${k} at ${dot.x.toFixed(1)},${dot.y.toFixed(1)}`)
+      }
+    }
+  }
+  const halves = scene.stubs.map(d => ({ v: d.half === 'source' ? topo.edges[d.edge].from : topo.edges[d.edge].to, segments: d.segs }))
+  problems.push(...facingStubs(topo, halves.filter(h => geometry.columns[topo.nodes[h.v].col].tracks > 1)))
+  return problems
+}
+
+describe('faint edges, stubs and hover previews (design-spec 8.7, 8.10, owner decision 19.11)', () => {
+  const overview = model()
+  const formOf = (m: Model, e: number) => classifyOverviewEdge(topology, m.geometry, e, { longStubs: !m.scene.input.showAllEdges && !m.presentation.dimming })
+  const drawnFaint = (m: Model) => m.presentation.edgeRole.flatMap((role, e) =>
+    role === 'faint' && m.scene.nodes[topology.edges[e].from].visible && m.scene.nodes[topology.edges[e].to].visible ? [e] : [])
+
+  it('draws full edges whole and long and inner-track edges as stubs, by the graph-core classification', () => {
+    const { scene, geometry, presentation } = overview
+    const full = new Set(scene.faint.flatMap(group => group.edges.map(d => d.edge)))
+    const halves = stubHalves(scene)
+    const forms = { full: 0, 'long-stub': 0, 'inner-stub': 0 }
     let byDy = 0
-    topology.edges.forEach((edge, e) => {
-      if (presentation.edgeRole[e] !== 'faint') return
-      const long = isLongEdge(scene, e)
-      if (long && !stubbed.has(e)) return // both halves cut (dense wrapped cells)
-      expect(stubbed.has(e)).toBe(long)
-      const lanes = Math.abs(scene.laneRank[topology.nodes[edge.from].lane] - scene.laneRank[topology.nodes[edge.to].lane])
-      if (lanes < 3 && Math.abs(geometry.nodes[edge.to].cy - geometry.nodes[edge.from].cy) > RENDER.stub.maxDy) byDy++
-    })
+    // A 'full' edge whose plain curve passes a course it does not connect is drawn as stubs too.
+    const candidates = drawnFaint(overview).filter(e => formOf(overview, e) === 'full')
+    const hits = plainEdgeBlocked(topology, geometry, candidates, { presentation, planWith: scene.planWith })
+    const blocked = new Set(candidates.filter((_, k) => hits[k]))
+    expect(blocked.size).toBeGreaterThan(100)
+    for (const e of drawnFaint(overview)) {
+      const form = formOf(overview, e)
+      forms[form]++
+      expect(full.has(e), `${e} ${form}`).toBe(form === 'full' && !blocked.has(e))
+      if (form === 'full' && !blocked.has(e)) {
+        expect(halves.has(e)).toBe(false)
+        continue
+      }
+      // Each end outside a wrapped cell's inner tracks always gets its stub; an inner end gets one
+      // unless its own track gap is too narrow (graph-core leaves it empty then).
+      const inner = innerTrackEnds(topology, geometry, e)
+      if (!inner.source) expect(halves.get(e)?.source, `source of ${e}`).toBeDefined()
+      if (!inner.target) expect(halves.get(e)?.target, `target of ${e}`).toBeDefined()
+      if (form === 'long-stub') {
+        expect(isLongEdge(scene, e)).toBe(true)
+        const { from, to } = topology.edges[e]
+        const lanes = Math.abs(scene.laneRank[topology.nodes[from].lane] - scene.laneRank[topology.nodes[to].lane])
+        if (lanes < RENDER.stub.laneSpan && Math.abs(geometry.nodes[to].cy - geometry.nodes[from].cy) > RENDER.stub.maxDy) byDy++
+      }
+    }
+    // Not vacuous: the overview wraps (ENG, ...), has long edges, long by distance alone, and full edges.
+    expect(forms['inner-stub']).toBeGreaterThan(0)
+    expect(forms['long-stub']).toBeGreaterThan(0)
+    expect(forms.full).toBeGreaterThan(forms['long-stub'])
     expect(byDy).toBeGreaterThan(0)
-    expect(faint.length + stubbed.size).toBeLessThanOrEqual(presentation.edgeRole.filter(role => role === 'faint').length)
-    expect(faint.length + stubbed.size).toBeGreaterThan(0.995 * presentation.edgeRole.filter(role => role === 'faint').length)
-    // Show all connections draws every faint edge at full length.
-    const all = model({ showAllEdges: true })
-    expect(all.scene.stubs).toEqual([])
-    expect(all.scene.faint.flatMap(group => group.edges).length).toBe(faint.length + stubbed.size)
+    // Every stub half ends in its terminal dot.
+    expect(scene.stubDots.length).toBe(scene.stubs.length)
   })
 
-  it('starts every source stub at the column out-port, stepping wrapped tracks through the row gap first', () => {
-    const { scene, geometry } = overview
-    // Highest labelled track of each node's cell: only nodes with tracks to their right detour.
-    const cellMaxTrack = (v: number) => Math.max(...topology.cells[topology.nodes[v].lane][topology.nodes[v].col].map(u => geometry.nodes[u].track))
-    let wrapped = 0
-    let last = 0
-    const dots = new Set(scene.stubDots.map(dot => `${dot.x},${dot.y}`))
-    for (const [e, { source, target }] of stubHalves(scene, geometry)) {
-      const { from, to } = topology.edges[e]
-      const a = geometry.nodes[from]
-      if (source) {
-      const column = geometry.columns[topology.nodes[from].col]
-      const colOut = column.x + column.w - 2
-      const segs = source.segs
-      const end = segs[segs.length - 1]
-      const stubStart = segs[segs.length - 2]
-      // The 14 px stub itself: horizontal, from the column out-port, ending at the terminal dot.
-      expect(end.op).toBe('L')
-      expect(end.y).toBeCloseTo(stubStart.y, 9)
-      expect(end.x - stubStart.x).toBeCloseTo(RENDER.stub.source, 9)
-      expect(stubStart.x).toBeGreaterThanOrEqual(colOut - 1e-9)
-      expect(dots.has(`${end.x},${end.y}`)).toBe(true)
-      if (a.track < cellMaxTrack(from)) {
-        wrapped++
-        // Leaves its own track on its row, then runs in the row gap (half a row away) to the out-port.
-        const trackRight = column.x + a.track * (column.trackW + 8) + column.trackW
-        expect(segs[0].y).toBeCloseTo(a.cy, 9)
-        expect(segs[0].x).toBeLessThanOrEqual(trackRight)
-        expect(Math.abs(stubStart.y - a.cy)).toBeGreaterThan(8)
-        expect(stubStart.x).toBeCloseTo(colOut, 9)
-      } else {
-        last++
-        expect(segs[0].op).toBe('M')
-        for (const seg of segs) expect(seg.y).toBeCloseTo(a.cy, 9)
-      }
-      }
-      if (!target) continue
-      // Target stub: 10 px into the entry, then into the dot: from the left on its row, or (a later
-      // wrapped track) straight down or up from the row gap at cx, so nothing lies on its row
-      // between the previous track's label and its dot.
-      const b = geometry.nodes[to]
-      const tail = target.segs[target.segs.length - 1]
-      if (b.track > 0) {
-        expect(tail.x).toBeCloseTo(b.cx, 9)
-        expect(Math.abs(tail.y - b.cy)).toBeCloseTo(scene.nodes[to].r + 1, 9)
-      } else {
-        expect(tail.y).toBeCloseTo(b.cy, 9)
-        expect(tail.x).toBeLessThanOrEqual(b.cx)
-      }
-      expect(target.segs[1].x - target.segs[0].x).toBeCloseTo(RENDER.stub.target, 9)
-      expect(dots.has(`${target.segs[0].x},${target.segs[0].y}`)).toBe(true)
+  it('Show all connections draws long edges in full but keeps inner-track links as stubs (19.11)', () => {
+    const all = model({ showAllEdges: true })
+    const full = new Set(all.scene.faint.flatMap(group => group.edges.map(d => d.edge)))
+    const stubbed = new Set(all.scene.stubs.map(d => d.edge))
+    let inner = 0
+    for (const e of drawnFaint(all)) {
+      const ends = innerTrackEnds(topology, all.geometry, e)
+      const isInner = ends.source || ends.target
+      if (isInner) inner++
+      expect(full.has(e), `${e}`).toBe(!isInner)
+      if (stubbed.has(e)) expect(isInner).toBe(true)
     }
-    expect(wrapped).toBeGreaterThan(0)
-    expect(last).toBeGreaterThan(0)
+    expect(inner).toBeGreaterThan(0)
+    // Edges whose plain curve passes another course are drawn in full, routed around labels and dots.
+    const drawnFull = all.scene.faint.flatMap(group => group.edges)
+    const blocked = plainEdgeBlocked(topology, all.geometry, drawnFull.map(d => d.edge), { presentation: all.presentation, planWith: all.scene.planWith })
+    // (plainEdgeBlocked reports the plain curve; the drawn, routed path clears every course.) The
+    // renderer routes them in layout edge order.
+    const routed = drawnFull.filter((_, k) => blocked[k]).sort((a, b) => a.edge - b.edge)
+    expect(routed.length).toBeGreaterThan(100)
+    const expected = routedEdgePaths(topology, all.geometry, routed.map(d => d.edge), { presentation: all.presentation, planWith: all.scene.planWith })
+    routed.forEach((d, k) => expect(d.segs).toEqual(expected[k]))
+    // The long edges of the default overview are among the full ones now.
+    const long = drawnFaint(overview).filter(e => formOf(overview, e) === 'long-stub')
+    expect(long.length).toBeGreaterThan(0)
+    for (const e of long) expect(full.has(e)).toBe(true)
+  })
+
+  it('draws each stub end in its own form: long-edge port stubs, inner stubs inside their own track gap', () => {
+    const { scene, geometry } = overview
+    const opt = geometryOptions(geometry)
+    const dots = new Set(scene.stubDots.map(dot => `${dot.x},${dot.y}`))
+    let innerSources = 0
+    let innerTargets = 0
+    let portSources = 0
+    let portTargets = 0
+    for (const [e, { source, target }] of stubHalves(scene)) {
+      const { from, to } = topology.edges[e]
+      const inner = innerTrackEnds(topology, geometry, e)
+      if (source) {
+        const a = geometry.nodes[from]
+        const col = topology.nodes[from].col
+        const segs = source.segs
+        const end = segs[segs.length - 1]
+        expect(dots.has(`${end.x},${end.y}`)).toBe(true)
+        for (const seg of segs) expect(seg.y).toBeCloseTo(a.cy, 9)
+        if (inner.source) {
+          innerSources++
+          // Straight along its row from the label end, at most 14 px, its terminal dot clear of the
+          // next track (whose left edge it never reaches); only where no course of the next track
+          // sits on its row.
+          expect(topology.cells[topology.nodes[from].lane][col].some(u => geometry.nodes[u].track === a.track + 1 && geometry.nodes[u].cy === a.cy)).toBe(false)
+          expect(segs[0].x).toBeCloseTo(a.x + a.w + 2, 9)
+          expect(end.x - segs[0].x).toBeLessThanOrEqual(RENDER.stub.source + 1e-9)
+          expect(end.x + RENDER.stub.terminal).toBeLessThan(trackLeftOf(geometry, col, a.track + 1))
+        } else {
+          portSources++
+          // The 14 px stub from the column out-port.
+          const column = geometry.columns[col]
+          const stubStart = segs[segs.length - 2]
+          expect(end.x - stubStart.x).toBeCloseTo(RENDER.stub.source, 9)
+          expect(stubStart.x).toBeGreaterThanOrEqual(column.x + column.w - 2 - 1e-9)
+        }
+      }
+      if (target) {
+        const b = geometry.nodes[to]
+        const col = topology.nodes[to].col
+        const segs = target.segs
+        const tail = segs[segs.length - 1]
+        expect(dots.has(`${segs[0].x},${segs[0].y}`)).toBe(true)
+        expect(tail.x).toBeLessThanOrEqual(b.cx)
+        if (inner.target) {
+          innerTargets++
+          // A hook from the row gap next to its row: its terminal dot in the track gap before its
+          // track, then down (or up) onto the dot; never along its row from the previous track.
+          const left = trackLeftOf(geometry, col, b.track)
+          expect(segs[0].x).toBeGreaterThan(left - opt.trackGap)
+          expect(segs[0].x).toBeLessThan(left)
+          expect(Math.abs(segs[0].y - b.cy)).toBeGreaterThan(scene.nodes[to].r + 1)
+          expect(tail.x).toBeCloseTo(b.cx, 9)
+          expect(Math.abs(tail.y - b.cy)).toBeCloseTo(scene.nodes[to].r + 1, 9)
+        } else {
+          for (const seg of segs) expect(seg.y).toBeCloseTo(b.cy, 9)
+          portTargets++
+          expect(b.track).toBe(0)
+          expect(segs[1].x - segs[0].x).toBeCloseTo(RENDER.stub.target, 9)
+        }
+      }
+    }
+    expect(Math.min(innerTargets, portSources, portTargets)).toBeGreaterThan(0)
+    // Inner source stubs are drawn only where nothing in the next track faces them: few or none.
+    expect(innerSources).toBeLessThan(innerTargets)
+  })
+
+  it('never lets a faint stroke cross another track of its column, in any overview or with Show all connections (19.11)', () => {
+    let wrappedCells = 0
+    for (const input of [{}, { titles: true }, { showAllEdges: true }, { titles: true, showAllEdges: true }, { focusId: 'UTM:CSC148H5', showAllEdges: true }, { subjects: new Set(['ENG', 'ENV', 'CCT']) }]) {
+      const m = model(input)
+      wrappedCells += m.geometry.columns.filter(c => c.tracks > 1).length
+      expect(wrappedTrackViolations(m.scene), JSON.stringify(input, (_, v: unknown) => (v instanceof Set ? [...v] : v))).toEqual([])
+    }
+    expect(wrappedCells).toBeGreaterThan(0)
+    // The check bites: the full plain paths of the inner-stub edges (what the overview drew before
+    // 19.11: through the row gaps, across the later tracks) do cross other tracks.
+    const { scene, geometry, presentation } = overview
+    const inner = drawnFaint(overview).filter(e => formOf(overview, e) === 'inner-stub')
+    const before = plainEdgePaths(topology, geometry, inner, { presentation, planWith: scene.planWith })
+    expect(otherTrackCrossings(topology, geometry, inner.map((edge, k) => ({ edge, segments: before[k] }))).length).toBeGreaterThan(0)
+  })
+
+  it('routes hover previews and full faint edges around the courses they do not connect (visual QA)', () => {
+    // A plain curve skipping a column ran straight through the courses on its row (CSC209H5 →
+    // CSC379H5 read as CSC318H5 → CSC338H5): previews are routed, full faint edges are only drawn
+    // when their curve is clear (else stubs, or routed with Show all connections).
+    for (const input of [{}, { titles: true }, { showAllEdges: true }]) {
+      const m = model(input)
+      const boxes = obstacleBoxes(topology, m.presentation, m.geometry)
+      const asPaths = (list: readonly EdgeDraw[]) => list.map(d => ({ edge: d.edge, role: 'faint' as const, kind: topology.edges[d.edge].kind, shape: 'edge' as const, segments: d.segs }))
+      expect(pathIntrusions(topology, asPaths(m.scene.faint.flatMap(group => group.edges)), boxes, -1), JSON.stringify(input)).toEqual([])
+      if (Object.keys(input).length) continue
+      const degree = new Map<number, number>()
+      for (const edge of topology.edges) for (const v of [edge.from, edge.to]) degree.set(v, (degree.get(v) ?? 0) + 1)
+      const busiest = [...degree].sort((a, b) => b[1] - a[1]).slice(0, 25).map(([v]) => v)
+      for (const v of [...busiest, idx('CSC209H5'), idx('BIO152H5'), idx('SOC205H5')]) {
+        const hover = hoverEdges(m.scene, v)!
+        expect(pathIntrusions(topology, asPaths([...hover.solid, ...hover.dashed]), boxes, -1), topology.nodes[v].code).toEqual([])
+      }
+    }
+    // Not vacuous: CSC209H5's plain previews do run through other courses.
+    const { scene, geometry, presentation } = overview
+    const v = idx('CSC209H5')
+    const own = topology.edges.flatMap((edge, e) => (edge.from === v || edge.to === v ? [e] : []))
+    const plain = plainEdgePaths(topology, geometry, own, { presentation, leader: true, planWith: scene.planWith })
+    const plainPaths = own.map((edge, k) => ({ edge, role: 'faint' as const, kind: topology.edges[edge].kind, shape: 'edge' as const, segments: plain[k] }))
+    expect(pathIntrusions(topology, plainPaths, obstacleBoxes(topology, presentation, geometry), -1).length).toBeGreaterThan(0)
+  })
+
+  it('previews a hovered node in an inner track with all its links in full, crossing its column only transiently', () => {
+    const { scene, geometry, presentation } = overview
+    const inner = drawnFaint(overview).filter(e => formOf(overview, e) === 'inner-stub')
+    const v = topology.edges[inner[0]].from
+    const hover = hoverEdges(scene, v)!
+    const list = [...hover.solid, ...hover.dashed]
+    const own = topology.edges.flatMap((edge, e) => (edge.from === v || edge.to === v) && scene.nodes[edge.from].visible && scene.nodes[edge.to].visible ? [e] : [])
+    expect(list.map(d => d.edge).sort((a, b) => a - b)).toEqual(own)
+    const expected = routedEdgePaths(topology, geometry, list.map(d => d.edge), { presentation, leader: true, planWith: scene.planWith })
+    list.forEach((d, k) => expect(d.segs).toEqual(expected[k]))
+    // Full length: every preview reaches its far end (the target's dot or the source's label).
+    for (const d of list) {
+      const { from, to } = topology.edges[d.edge]
+      const last = d.segs[d.segs.length - 1]
+      const b = geometry.nodes[to]
+      expect(Math.hypot(last.x - b.cx, last.y - b.cy)).toBeLessThan(scene.nodes[to].r + 2)
+      expect(d.segs[0].x).toBeCloseTo(geometry.nodes[from].x + geometry.nodes[from].w + 4, 9)
+    }
   })
 
   it('never draws a faint edge or stub through a label or dot of its own columns (real data, stub measure)', () => {
@@ -351,8 +519,8 @@ describe('faint edges, stubs and hover previews (design-spec 8.7, 8.10)', () => 
       // track's dot on the same row for some wrapped sources.
       if (Object.keys(input).length) continue
       let naiveHits = 0
-      for (const [e, { source }] of stubHalves(scene, geometry)) {
-        if (!source) continue
+      for (const e of drawnFaint(overview)) {
+        if (!innerTrackEnds(topology, geometry, e).source) continue
         const from = topology.edges[e].from
         const a = geometry.nodes[from]
         const column = geometry.columns[topology.nodes[from].col]
@@ -372,21 +540,22 @@ describe('faint edges, stubs and hover previews (design-spec 8.7, 8.10)', () => 
     const hover = hoverEdges(scene, v)!
     const list = [...hover.solid, ...hover.dashed]
     expect(list.length).toBe(topology.edges.filter(e => e.from === v || e.to === v).length)
-    // Faint edges and stubs plan their wrapped-track row gaps over the whole picture; the hover
-    // preview plans over the same picture plus its own edges.
-    const picture = [...new Set([...scene.faint.flatMap(group => group.edges.map(d => d.edge)), ...scene.stubs.map(d => d.edge)])]
-    const highlighted = plainEdgePaths(topology, geometry, list.map(d => d.edge), { presentation, leader: true, planWith: [...new Set([...picture, ...list.map(d => d.edge)])] })
+    // Faint edges and stubs are planned over the whole picture (one plan per scene); the hover
+    // preview uses the same plan (its node's edges are all part of the picture in the overview).
+    const picture = scene.planWith
+    expect(new Set(picture)).toEqual(new Set([...scene.faint.flatMap(group => group.edges.map(d => d.edge)), ...scene.stubs.map(d => d.edge)]))
+    const highlighted = routedEdgePaths(topology, geometry, list.map(d => d.edge), { presentation, leader: true, planWith: picture })
     list.forEach((d, k) => expect(d.segs).toEqual(highlighted[k]))
     // Faint: no leader (8.7), so the edge starts past the label end + 4 where the hover leader starts.
     const faint = scene.faint.flatMap(group => group.edges).find(d => topology.edges[d.edge].from === v)!
-    expect(faint.segs).toEqual(plainEdgePaths(topology, geometry, [faint.edge], { presentation, planWith: picture, truncateUnplaced: true })[0])
+    expect(faint.segs).toEqual(plainEdgePaths(topology, geometry, [faint.edge], { presentation, planWith: picture })[0])
     const leader = highlighted.find((_, k) => list[k].edge === faint.edge)!
     expect(leader[0].x).toBeCloseTo(geometry.nodes[v].x + geometry.nodes[v].w + 4, 9)
     expect(faint.segs[0].x).toBeGreaterThan(leader[0].x)
     // Stubs are graph-core's stub halves, unchanged.
-    const halves = stubHalves(scene, geometry)
+    const halves = stubHalves(scene)
     const stubbed = [...halves.keys()]
-    const stubs = plainEdgeStubs(topology, geometry, stubbed, { presentation, planWith: picture, truncateUnplaced: true })
+    const stubs = plainEdgeStubs(topology, geometry, stubbed, { presentation, planWith: picture })
     stubbed.forEach((e, k) => {
       expect(halves.get(e)!.source?.segs ?? []).toEqual(stubs[k].source)
       expect(halves.get(e)!.target?.segs ?? []).toEqual(stubs[k].target)
@@ -500,6 +669,148 @@ describe('drawing (design-spec 3.3, 7.5, 8.11, 8.13)', () => {
     const v = idx('CSC148H5')
     expect(half.nodes[v].cy).toBeCloseTo((a.nodes[v].cy + b.nodes[v].cy) / 2, 9)
     expect(half.height).toBeCloseTo((a.height + b.height) / 2, 9)
+  })
+})
+
+describe('geometry tweens (design-spec 17)', () => {
+  const overview = model()
+  const selected = model({ focusId: 'UTM:CSC148H5' })
+  const hidden = model({ focusId: 'UTM:CSC148H5', hideUnrelated: true })
+  const mix = (a: number, b: number, t: number) => a + (b - a) * t
+  const f = idx('CSC148H5')
+
+  it('moves nodes between layouts and lets appearing or disappearing ones ride with their lane and column', () => {
+    const a = selected.geometry
+    const b = hidden.geometry
+    expect(interpolateGeometry(a, b, 1, topology)).toBe(b)
+    const half = interpolateGeometry(a, b, 0.5, topology)
+    // Visible in both: halfway between the two boxes.
+    expect(half.nodes[f].cx).toBeCloseTo((a.nodes[f].cx + b.nodes[f].cx) / 2, 9)
+    // A grey dot of a lane that "Hide unrelated" collapses: kept, in its shrinking lane.
+    const v = topology.nodes.findIndex((_, i) => a.nodes[i].cls === 'mini' && !a.nodes[i].overflow && b.nodes[i].cls === 'hidden' && b.lanes[topology.nodes[i].lane].h === 0)
+    expect(v).toBeGreaterThanOrEqual(0)
+    const lane = topology.nodes[v].lane
+    expect(half.nodes[v].cls).toBe('mini')
+    expect(half.lanes[lane]).toMatchObject({ collapsed: false, h: (a.lanes[lane].h + b.lanes[lane].h) / 2 })
+    expect(half.nodes[v].cy).toBeGreaterThanOrEqual(half.lanes[lane].y - 1e-9)
+    expect(half.nodes[v].cy).toBeLessThanOrEqual(half.lanes[lane].y + half.lanes[lane].h + 1e-9)
+    // ... and the same dot coming back grows out of the reopening lane.
+    const back = interpolateGeometry(b, a, 0.25, topology)
+    expect(back.nodes[v].cls).toBe('mini')
+    expect(back.nodes[v].cy).toBeGreaterThanOrEqual(back.lanes[lane].y - 1e-9)
+    expect(back.nodes[v].cy).toBeLessThanOrEqual(back.lanes[lane].y + back.lanes[lane].h + 1e-9)
+    // Without the topology such a node simply takes its next box.
+    expect(interpolateGeometry(a, b, 0.5).nodes[v]).toBe(b.nodes[v])
+    // Bands hidden by a level filter stay visible until the end of the tween.
+    const levels = model({ levels: new Set([300]) }).geometry
+    const bands = interpolateGeometry(overview.geometry, levels, 0.5, topology).bands
+    expect(bands.every((band, i) => band.visible === (overview.geometry.bands[i].visible || levels.bands[i].visible))).toBe(true)
+  })
+
+  it('builds tween frames without edges: next styles, interpolated radii, the labels of one layout', () => {
+    const from = overview.scene
+    const to = selected.scene
+    const early = tweenScene(from, to, 0.3, 'from')
+    const late = tweenScene(from, to, 0.3, 'to')
+    for (const frame of [early, late]) {
+      expect(frame.tween).toBe(true)
+      expect([frame.faint, frame.stubs, frame.stubDots, frame.routeLayers.flat(), frame.junctions]).toEqual([[], [], [], [], []])
+    }
+    // A course that becomes a grey dot: mini style at once, radius on its way from 3.75 to 2.25, and
+    // its code label only while the previous labels are shown.
+    const v = topology.nodes.findIndex((_, i) => from.nodes[i].cls === 'compact' && to.nodes[i].cls === 'mini' && to.nodes[i].visible)
+    expect(early.nodes[v]).toMatchObject({ cls: 'mini', color: '#nodeMini', r: mix(3.75, 2.25, 0.3), labelled: false })
+    expect(early.nodes[v].label?.code).toBe(topology.nodes[v].code)
+    expect(late.nodes[v].label).toBeNull()
+    // A direct prerequisite: blue, radius 3.75 → 5, its new full label (blue code) placed at its interpolated position.
+    const p = idx('CSC108H5')
+    expect(late.nodes[p]).toMatchObject({ color: '#nodePrereqDirect', codeColor: '#preInk', r: mix(3.75, 5, 0.3) })
+    expect(late.nodes[p].label?.title).toBeTruthy()
+    expect(late.nodes[p].boxY0).toBeCloseTo(late.input.geometry.nodes[p].cy - RENDER.label.halfFull, 9)
+    // The new focus has its plate (and wash) at its interpolated position from the first frame.
+    const layout = to.plate!.layout
+    expect(early.plate).toMatchObject({ index: f, y: early.input.geometry.nodes[f].cy - layout.height / 2 })
+    expect(early.wash!.row.y).toBeCloseTo(early.input.geometry.nodes[f].cy - Math.max(layout.height, early.input.geometry.nodes[f].h) / 2, 9)
+    // Clearing: no plate; the old one fades out with the old labels; the old focus shrinks as a dot.
+    const clearing = tweenScene(to, from, 0.3, 'from')
+    expect(clearing.plate).toBeNull()
+    expect(clearing.wash).toBeNull()
+    expect(clearing.fadingPlate?.index).toBe(f)
+    expect(clearing.nodes[f]).toMatchObject({ glyph: 'disc', r: mix(RENDER.radius.focusCentre, 3.75, 0.3) })
+    expect(tweenScene(to, from, 0.3, 'to').fadingPlate).toBeNull()
+    // Hide unrelated: grey dots shrink away; their lanes keep a rank (separators) until the end.
+    const hiding = tweenScene(to, hidden.scene, 0.5, 'to')
+    const gone = topology.nodes.findIndex((_, i) => to.nodes[i].visible && to.nodes[i].cls === 'mini' && !hidden.scene.nodes[i].visible)
+    expect(hiding.nodes[gone]).toMatchObject({ visible: true, cls: 'mini', r: RENDER.radius.mini * 0.5, rings: [] })
+    expect([...hiding.laneRank].filter(r => r >= 0).length).toBe([...to.laneRank].filter(r => r >= 0).length)
+    // Slim-lane "+n" labels follow their dot.
+    const overflow = tweenScene(to, hidden.scene, 0.5, 'from').overflowLabels
+    for (const o of overflow) expect(o.y).toBeCloseTo(hiding.input.geometry.nodes[o.index].cy, 9)
+  })
+
+  it('draws tween frames without edges or knockouts, with label, plate and focus-ring motion', () => {
+    const frame = tweenScene(overview.scene, selected.scene, 0.5, 'to')
+    const { ctx, calls } = mockContext()
+    drawScene(ctx, frame, frameOf(selected, 1, { labelAlpha: 0.4, focusScale: 0.6, plateAlpha: 0.5 }))
+    expect(edgeStrokes(calls)).toEqual([])
+    expect(calls.some(c => c.name === 'fill' && c.state.globalAlpha === RENDER.knockoutAlpha)).toBe(false)
+    const texts = calls.filter(c => c.name === 'fillText')
+    const plate = texts.filter(c => c.state.fillStyle === '#selPlateInk')
+    const labels = texts.filter(c => c.state.fillStyle !== '#selPlateInk')
+    expect(labels.length).toBeGreaterThan(10)
+    for (const c of labels) expect(c.state.globalAlpha).toBe(0.4)
+    expect(plate.length).toBeGreaterThan(0)
+    expect(plate[0].state.globalAlpha).toBe(0.5)
+    // The focus ring at 0.6 of its size (2 px stroke centred on the ring).
+    const ring = calls.findIndex(c => c.name === 'stroke' && c.state.strokeStyle === '#nodeSelectedRing')
+    const arc = calls.slice(0, ring).reverse().find(c => c.name === 'arc')!
+    expect(arc.args[2]).toBeCloseTo(RENDER.radius.focusRing * 0.6 - RENDER.focusRingWidth / 2, 9)
+    // Nothing of the edges' layers is drawn at zero opacity either.
+    const hidden0 = mockContext()
+    drawScene(hidden0.ctx, selected.scene, frameOf(selected, 1, { edgeAlpha: 0, transitiveAlpha: 0 }))
+    expect(edgeStrokes(hidden0.calls)).toEqual([])
+  })
+
+  it('fades chain edges in by opacity only: direct (and faint) edges first, transitive and program edges after', () => {
+    const { ctx, calls } = mockContext()
+    drawScene(ctx, selected.scene, frameOf(selected, 1, { edgeAlpha: 0.5, transitiveAlpha: 0.25 }))
+    const strokes = edgeStrokes(calls)
+    const transitive = strokes.filter(c => c.state.strokeStyle === '#edgePrereqTransitive' || c.state.strokeStyle === '#edgeUnlockTransitive')
+    const direct = strokes.filter(c => c.state.strokeStyle === '#edgePrereqDirect' || c.state.strokeStyle === '#edgeUnlockDirect')
+    expect(transitive.length).toBeGreaterThan(0)
+    expect(direct.length).toBeGreaterThan(0)
+    for (const c of transitive) expect(c.state.globalAlpha).toBe(0.25)
+    for (const c of direct) expect(c.state.globalAlpha).toBe(0.5)
+    // One stroke per group still (overlaps never darken), at the group's opacity.
+    expect(strokes.length).toBe(selected.scene.routeLayers.flat().length)
+    const faint = mockContext()
+    drawScene(faint.ctx, overview.scene, frameOf(overview, 1, { edgeAlpha: 0.3, transitiveAlpha: 0 }))
+    const faintStrokes = edgeStrokes(faint.calls)
+    expect(faintStrokes.length).toBeGreaterThan(0)
+    for (const c of faintStrokes) expect(c.state.globalAlpha).toBe(0.3)
+  })
+
+  it('keeps the overlay rows of lanes, bands and columns a tween hides until it ends', () => {
+    const a = selected.geometry
+    const b = hidden.geometry
+    expect(overlayRowsChange(a, b)).toBe(true)
+    expect(overlayRowsChange(b, a)).toBe(true)
+    expect(overlayRowsChange(a, a)).toBe(false)
+    const kept = overlayGeometry(a, b)
+    const rowsOf = (geometry: Geometry) => buildLaneRows({
+      topology, geometry, counts: laneCounts(topology, hidden.presentation), focus: f, programActive: false,
+      strings: GRAPH_STRINGS.en, divisionLabels: DIVISION_STRINGS.en, lang: 'en',
+    }).map(row => row.lane)
+    expect(rowsOf(kept)).toEqual(rowsOf(a))
+    expect(rowsOf(b).length).toBeLessThan(rowsOf(a).length)
+    // Positions still come from the frame's (interpolated) geometry; only visibility is kept.
+    b.lanes.forEach((box, i) => {
+      if (!box.collapsed) expect(kept.lanes[i]).toBe(box)
+    })
+    const levels = model({ levels: new Set([300]) }).geometry
+    const keptBands = overlayGeometry(overview.geometry, levels).bands
+    expect(keptBands.filter(band => band.visible).length).toBe(overview.geometry.bands.filter(band => band.visible).length)
+    expect(overlayGeometry(overview.geometry, levels).columns.filter(c => c.w > 0).length).toBe(overview.geometry.columns.filter(c => c.w > 0).length)
   })
 })
 

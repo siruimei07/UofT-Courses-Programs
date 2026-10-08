@@ -14,6 +14,8 @@ export interface FrameInfo {
   geometry: Geometry
   /** Zoom, size or geometry changed since the previous frame: sizes must be rewritten. */
   scaleChanged: boolean
+  /** A geometry tween is interpolating (17): edge-of-view pills wait for the settled layout. */
+  moving?: boolean
   /** World → graph-area CSS px. */
   toX(wx: number): number
   toY(wy: number): number

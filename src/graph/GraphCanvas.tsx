@@ -18,7 +18,10 @@ import { createFrameBus } from './overlays/frame'
 import { LaneColumn, type LaneAction } from './overlays/LaneColumn'
 import { Scrollbars } from './overlays/Scrollbars'
 import { Tooltip, type RelationTone, type TooltipState } from './overlays/Tooltip'
-import { buildScene, drawScene, hoverEdges, interpolateGeometry, nodeRect, unionRects, type FrameStats, type Scene, type SceneInput } from './renderer'
+import {
+  buildScene, drawScene, hoverEdges, nodeRect, overlayGeometry, overlayRowsChange, tweenScene, unionRects,
+  type FrameStats, type Scene, type SceneInput,
+} from './renderer'
 import { DIVISION_STRINGS, GRAPH_STRINGS, type GraphStrings } from './strings'
 import { createLabelMeasure, isLabelMeasurer, useTextMetricsVersion } from './text'
 import { readTokens, type RenderTokens } from './tokens'
@@ -28,7 +31,6 @@ import './graph.css'
 
 const OPT = DEFAULT_GEOMETRY_OPTIONS
 const DRAG_SLOP = 3
-const TOOLTIP_DELAY = 350
 const ANCHOR_TTL = 1500
 const FRAME_TTL = 1000
 const CURSOR_MARGIN = 48
@@ -36,11 +38,9 @@ const KEY_PAN = 80
 const LANE_JUMP_TOP = 8
 const LANE_MARK_TOP = 24
 const CHAIN_PAD = 12
-const MOTION = {
-  geometry: { duration: 260, ease: V.EASE_EMPHASIS },
-  frame: { duration: 320, ease: V.EASE_STANDARD },
-  fade: 160,
-}
+const MOTION = V.MOTION
+/** One frame at 60 Hz: the first animation frame of a motion shows at most this much of it. */
+const FRAME_MS = 1000 / 60
 
 const CHAIN_ROLES: ReadonlySet<NodeRole> = new Set<NodeRole>(['focus', 'prereq-direct', 'prereq', 'unlock-direct', 'unlock'])
 
@@ -63,15 +63,17 @@ interface Drag {
   moved: boolean
 }
 
-interface Tween {
+/** A geometry change in flight (17): the scene it started from and the scene it ends on. */
+interface GeometryTween {
   start: number
-  duration: number
-  ease: (t: number) => number
-  fromView: V.View
-  toView: V.View
-  fromGeometry: Geometry | null
-  toGeometry: Geometry | null
+  from: Scene
+  to: Scene
+  /** Opacity of the labels on screen when it started (an interrupting tween fades them from there). */
+  labelStart: number
 }
+
+/** Which part of a motion sequence a frame belongs to (development diagnostics). */
+type FramePhase = 'geometry' | 'fade' | 'view' | 'idle'
 
 interface Mutable {
   view: V.View
@@ -91,20 +93,77 @@ interface Mutable {
   scaleKey: string
   sceneVersion: number
   tipTimer: number
-  tween: Tween | null
-  fade: number | null
+  /** Geometry tween with its label and edge fades; animated pan / zoom; focus glyph and hover ring fades. */
+  geo: GeometryTween | null
+  pan: V.ViewMotion | null
+  focusAt: number | null
+  hoverAt: number | null
+  /**
+   * Motions started since the last animation frame. A state change keeps the main thread busy after
+   * its commit (panels, effects); their clocks start on the first animation frame instead (at most
+   * one frame in), so a slow commit never swallows the start of a tween.
+   */
+  unarmed: Set<'geo' | 'pan' | 'focus'>
+  /** Geometry is still interpolating (edges hidden, pills held). */
+  moving: boolean
+  /**
+   * The first view request (landing: lane, hash course or program) and everything before it is
+   * instant, so the map never opens with a pan across other lanes; so is everything before the
+   * first user input. Set by that request or by any pointer, key or wheel input.
+   */
+  landed: boolean
+  /** Overlay rows are being kept for lanes / bands / columns that change visibility in a tween. */
+  overlayHeld: boolean
   prevScene: Scene | null
   prevFocus: number | null
-  /** Geometry of the last drawn frame (interpolated while a tween runs). */
-  shown: Geometry | null
+  /** Scene of the last drawn frame (a tween scene while geometry interpolates) and its label opacity. */
+  shown: Scene | null
+  shownLabels: number
 }
 
 /** Development-only diagnostics (frame timings and the current view) for harnesses and perf tests. */
-type StatsWindow = typeof globalThis & { __courseMapFrames?: (FrameStats & { total: number })[]; __courseMapView?: { view: V.View; plot: V.Plot } }
+type StatsWindow = typeof globalThis & {
+  __courseMapFrames?: (FrameStats & { total: number; phase: FramePhase; at: number })[]
+  __courseMapView?: { view: V.View; plot: V.Plot }
+}
 
+/** The layout of the last drawn frame: its geometry (tracks, boxes) and topology. */
+interface DrawnLayout {
+  geometry: Geometry
+  topology: GraphCanvasProps['topology']
+}
+
+let drawnLayout: DrawnLayout | null = null
+
+// Layout diagnostics in every build (architecture rule 3, the hard product rule): a read-only
+// `__courseMapLayout` getter returns the geometry and topology of the last drawn frame, so the
+// end-to-end checks can verify node by node, on the production build, that no column wraps while a
+// course is selected and every edge runs left to right. It exposes nothing beyond what the canvas
+// draws and cannot be assigned.
+if (typeof globalThis !== 'undefined' && !Object.getOwnPropertyDescriptor(globalThis, '__courseMapLayout')) {
+  Object.defineProperty(globalThis, '__courseMapLayout', { get: () => drawnLayout, configurable: true, enumerable: false })
+}
+
+let reducedMotionQuery: MediaQueryList | null | undefined
+
+/** prefers-reduced-motion, read live (one MediaQueryList, its `matches` follows the setting). */
+function reducedMotion(): boolean {
+  if (reducedMotionQuery === undefined) {
+    reducedMotionQuery = typeof window !== 'undefined' && typeof window.matchMedia === 'function'
+      ? window.matchMedia('(prefers-reduced-motion: reduce)')
+      : null
+  }
+  return reducedMotionQuery?.matches ?? false
+}
+
+/** Tweens and animated pans (17): only with the motion prop and without prefers-reduced-motion. */
 function motionAllowed(enabled: boolean | undefined): boolean {
-  if (!enabled || typeof window === 'undefined') return false
-  return !window.matchMedia('(prefers-reduced-motion: reduce)').matches
+  return !!enabled && typeof window !== 'undefined' && !reducedMotion()
+}
+
+/** Opacity fades of 100 ms or less (the 80 ms hover ring) remain under prefers-reduced-motion (17). */
+function shortFadesAllowed(enabled: boolean | undefined): boolean {
+  return !!enabled && MOTION.hover.ring <= MOTION.reducedFadeMax
 }
 
 function plotOf(width: number, height: number): V.Plot {
@@ -181,17 +240,26 @@ export function GraphCanvas(props: GraphCanvasProps) {
     scaleKey: '',
     sceneVersion: 0,
     tipTimer: 0,
-    tween: null,
-    fade: null,
+    geo: null,
+    pan: null,
+    focusAt: null,
+    hoverAt: null,
+    unarmed: new Set(),
+    moving: false,
+    landed: false,
+    overlayHeld: false,
     prevScene: null,
     prevFocus: null,
     shown: null,
+    shownLabels: 1,
   }).current
 
   const [tokens, setTokens] = useState<RenderTokens>(() => readTokens(theme))
   const [tip, setTip] = useState<TooltipState | null>(null)
   const [live, setLive] = useState('')
   const [area, setArea] = useState({ width: 0, height: 0 })
+  /** Layout a running tween started from, while it changes which lanes / bands / columns are visible. */
+  const [overlayFrom, setOverlayFrom] = useState<Geometry | null>(null)
 
   useLayoutEffect(() => {
     const refresh = () => setTokens(prev => {
@@ -221,6 +289,12 @@ export function GraphCanvas(props: GraphCanvasProps) {
   const grid = useMemo(() => buildHitGrid(geometry), [geometry])
   const lanes = useMemo(() => laneCounts(topology, presentation), [topology, presentation])
   const bands = useMemo(() => bandCounts(topology, presentation, geometry), [topology, presentation, geometry])
+  // While a tween collapses or reveals lanes, bands or columns, the lane column and band bar keep
+  // their rows until it ends, so they shrink or grow with the canvas (17).
+  const overlayGeo = useMemo(
+    () => (overlayFrom && overlayFrom.nodes.length === geometry.nodes.length ? overlayGeometry(overlayFrom, geometry) : geometry),
+    [overlayFrom, geometry],
+  )
 
   const pillTargets = useMemo<V.PillTarget[]>(() => {
     const out: V.PillTarget[] = []
@@ -247,44 +321,101 @@ export function GraphCanvas(props: GraphCanvasProps) {
   // -------------------------------------------------------------------------
   // Frame loop
 
-  const draw = useCallback(() => {
+  /** Overlay rows kept for a tween are released when its geometry stops moving. */
+  const releaseOverlays = useCallback(() => {
+    if (!s.overlayHeld) return
+    s.overlayHeld = false
+    setOverlayFrom(null)
+  }, [s])
+
+  /**
+   * Re-hit-tests the resting pointer once the layout and the view have settled: pointer moves during
+   * a geometry tween are not hit-tested (the end layout is not on screen yet), and a pan moves the
+   * map under a still pointer.
+   */
+  const refreshHover = useRef<() => void>(() => {})
+
+  /** Ends every motion at once: the view jumps to its target, geometry to its end, fades to full (17). */
+  const finishMotion = useCallback(() => {
+    const was = !!(s.pan || s.geo)
+    if (s.pan) {
+      s.view = V.viewMotionEnd(s.pan)
+      s.pan = null
+    }
+    if (s.geo) {
+      s.geo = null
+      s.sceneVersion++
+    }
+    s.moving = false
+    s.focusAt = null
+    s.hoverAt = null
+    releaseOverlays()
+    if (was) refreshHover.current()
+  }, [s, releaseOverlays])
+
+  const draw = useCallback((timestamp?: number) => {
     s.raf = 0
     const canvas = canvasRef.current
     const ctx = canvas?.getContext('2d')
     if (!canvas || !ctx || !s.width || !s.height) return
     const L = latest.current
     const started = performance.now()
-    let current = L.scene
-    let labelAlpha = 1
-    let animating = false
-    if (s.tween) {
-      const tw = s.tween
-      const t = Math.min(1, (started - tw.start) / tw.duration)
-      const e = tw.ease(t)
-      s.view = V.lerpView(tw.fromView, tw.toView, e)
-      if (tw.fromGeometry && tw.toGeometry && t < 1) {
-        current = buildScene({ ...L.sceneInput, geometry: interpolateGeometry(tw.fromGeometry, tw.toGeometry, e), edges: false })
-        labelAlpha = 0
-        s.sceneVersion++
-      }
-      if (t >= 1) {
-        s.tween = null
-        s.view = tw.toView
-        if (tw.toGeometry) s.fade = started
-        s.sceneVersion++
-      } else {
-        animating = true
-      }
-    }
-    let edgeAlpha = 1
-    if (s.fade !== null) {
-      const f = Math.min(1, (started - s.fade) / MOTION.fade)
-      labelAlpha = Math.min(labelAlpha, f)
-      edgeAlpha = f
-      if (f >= 1) s.fade = null
-      else animating = true
+    // First animation frame of motions started since the last one (drawNow passes no timestamp).
+    if (timestamp !== undefined && s.unarmed.size) {
+      const earliest = started - FRAME_MS
+      if (s.geo && s.unarmed.has('geo')) s.geo.start = Math.max(s.geo.start, earliest)
+      if (s.pan && s.unarmed.has('pan')) s.pan.start = Math.max(s.pan.start, earliest)
+      if (s.focusAt !== null && s.unarmed.has('focus')) s.focusAt = Math.max(s.focusAt, earliest)
+      s.unarmed.clear()
     }
     const plot = plotOf(s.width, s.height)
+    // prefers-reduced-motion switched on mid-sequence: finish it now.
+    if ((s.geo || s.pan || s.focusAt !== null) && !motionAllowed(L.props.motion)) finishMotion()
+    let current = L.scene
+    const settling = !!(s.geo && s.moving) || !!s.pan
+    let labelAlpha = 1
+    let edgeAlpha = 1
+    let transitiveAlpha = 1
+    let animating = false
+    let phase: FramePhase = 'idle'
+    if (s.geo) {
+      const g = V.geometryPhase(started - s.geo.start, s.geo.labelStart)
+      if (g.moving) {
+        current = tweenScene(s.geo.from, s.geo.to, g.t, g.labels)
+        labelAlpha = g.labelAlpha
+        phase = 'geometry'
+      } else {
+        edgeAlpha = g.direct
+        transitiveAlpha = g.transitive
+        phase = 'fade'
+      }
+      if (s.moving && !g.moving) releaseOverlays()
+      s.moving = g.moving
+      if (g.done) s.geo = null
+      else animating = true
+    }
+    if (s.pan) {
+      const p = V.viewAt(s.pan, started, plot)
+      s.view = p.view
+      if (p.done) s.pan = null
+      else animating = true
+      if (phase === 'idle' && !p.done) phase = 'view'
+    }
+    let focusScale = 1
+    let plateAlpha = 1
+    if (s.focusAt !== null) {
+      const f = V.focusPhase(started - s.focusAt)
+      focusScale = f.scale
+      plateAlpha = f.plate
+      if (f.done) s.focusAt = null
+      else animating = true
+    }
+    let hoverAlpha = 1
+    if (s.hoverAt !== null) {
+      hoverAlpha = V.progress(started - s.hoverAt, 0, MOTION.hover.ring)
+      if (hoverAlpha >= 1) s.hoverAt = null
+      else animating = true
+    }
     const view = s.view
     const focused = typeof document !== 'undefined' && document.activeElement === rootRef.current
     const stats = drawScene(ctx, current, {
@@ -295,11 +426,18 @@ export function GraphCanvas(props: GraphCanvasProps) {
       dpr: s.dpr,
       hover: s.hover,
       cursor: s.keyboard && focused ? s.cursor : -1,
-      hoverEdges: s.hoverEdges,
+      // The hover preview belongs to the settled layout; it waits while dots are still moving.
+      hoverEdges: s.moving ? null : s.hoverEdges,
       labelAlpha,
       edgeAlpha,
+      transitiveAlpha,
+      hoverAlpha,
+      focusScale,
+      plateAlpha,
     })
-    s.shown = current.input.geometry
+    if (current.input.geometry !== s.shown?.input.geometry) s.sceneVersion++
+    s.shown = current
+    s.shownLabels = labelAlpha
     const scaleKey = `${view.zoom}|${s.width}|${s.height}|${s.sceneVersion}`
     bus.emit({
       view,
@@ -308,19 +446,23 @@ export function GraphCanvas(props: GraphCanvasProps) {
       height: s.height,
       geometry: current.input.geometry,
       scaleChanged: scaleKey !== s.scaleKey,
+      moving: s.moving,
       toX: wx => V.toScreenX(view, plot, wx),
       toY: wy => V.toScreenY(view, plot, wy),
     })
     s.scaleKey = scaleKey
+    if (drawnLayout?.geometry !== current.input.geometry) drawnLayout = { geometry: current.input.geometry, topology: current.input.topology }
     if (import.meta.env.DEV) {
       const w = globalThis as StatsWindow
       const frames = (w.__courseMapFrames ??= [])
-      frames.push({ ...stats, total: performance.now() - started })
+      frames.push({ ...stats, total: performance.now() - started, phase, at: started })
       if (frames.length > 240) frames.splice(0, frames.length - 240)
       w.__courseMapView = { view, plot }
     }
     if (animating) s.raf = requestAnimationFrame(draw)
-  }, [bus, s])
+    // The layout stopped moving and the view stopped panning this frame: hover what is under the pointer.
+    if (settling && !s.moving && !s.pan) refreshHover.current()
+  }, [bus, s, finishMotion, releaseOverlays])
 
   const requestDraw = useCallback(() => {
     if (!s.raf) s.raf = requestAnimationFrame(draw)
@@ -338,32 +480,69 @@ export function GraphCanvas(props: GraphCanvasProps) {
 
   const currentPlot = useCallback(() => plotOf(s.width, s.height), [s])
 
-  /** Every view change goes through here: clamp, report zoom, redraw (optionally animated). */
-  const setView = useCallback((next: V.View, motion?: { duration: number; ease: (t: number) => number }) => {
+  /** Whether a view or geometry change may animate now (17): motion on, landed, not dragging. */
+  const animates = useCallback(() => s.landed && !s.drag?.moved && motionAllowed(latest.current.props.motion), [s])
+
+  /**
+   * Every view change goes through here: clamp, report zoom, redraw. With `motion` (framing, lane
+   * jumps, pill pans) it animates from the view on screen; the first such request (landing) and
+   * anything during a drag is instant.
+   */
+  const setView = useCallback((next: V.View, motion?: { duration: number; ease: V.Ease }) => {
     const L = latest.current
     const target = V.clampView(next, L.scene.world, currentPlot())
-    const before = s.tween ? s.tween.toView.zoom : s.view.zoom
-    if (motion && motionAllowed(L.props.motion)) {
-      s.tween = { start: performance.now(), duration: motion.duration, ease: motion.ease, fromView: s.view, toView: target, fromGeometry: null, toGeometry: null }
+    const before = s.pan ? V.viewMotionEnd(s.pan).zoom : s.view.zoom
+    if (motion && animates()) {
+      const now = performance.now()
+      const geo = s.geo && s.moving ? s.geo : null
+      if (geo && (s.unarmed.has('geo') || now - geo.start < FRAME_MS)) {
+        // A framing request that comes with a geometry change (hash, search) shares its clock and
+        // easing: with the pan on its own timing the lanes collapsing above swung the chain out of
+        // the plot and back (visual QA). On one clock the focus slides straight to its frame.
+        s.pan = { start: geo.start, from: s.view, to: target, duration: MOTION.geometry.duration, ease: MOTION.geometry.ease }
+        if (s.unarmed.has('geo')) s.unarmed.add('pan')
+      } else if (geo) {
+        // Mid-tween: finish together with the geometry.
+        const remaining = Math.max(MOTION.reducedFadeMax, geo.start + MOTION.geometry.duration - now)
+        s.pan = { start: now, from: s.view, to: target, duration: remaining, ease: MOTION.geometry.ease }
+        s.unarmed.add('pan')
+      } else {
+        s.pan = { start: now, from: s.view, to: target, duration: motion.duration, ease: motion.ease }
+        s.unarmed.add('pan')
+      }
     } else {
-      s.tween = null
+      s.pan = null
       s.view = target
     }
+    if (motion) s.landed = true
     if (target.zoom !== before) L.props.onZoomChange?.(target.zoom)
     requestDraw()
-  }, [currentPlot, requestDraw, s])
+  }, [currentPlot, requestDraw, animates, s])
 
-  /** Any user input jumps a running tween to its end (17). */
+  /** Any user input jumps every running motion to its end (17) and drops pending anchors and frames. */
   const settle = useCallback(() => {
-    if (s.tween) {
-      s.view = s.tween.toView
-      s.tween = null
-      s.sceneVersion++
-    }
-    s.fade = null
+    finishMotion()
     s.pendingFrame = null
     s.anchor = null
-  }, [s])
+  }, [s, finishMotion])
+
+  // Pointer and key input anywhere (toolbar, panel, search, shortcuts) counts as input: it ends the
+  // landing phase and jumps a running tween to its end before the input's own effect starts.
+  useEffect(() => {
+    const onInput = () => {
+      s.landed = true
+      if (s.geo || s.pan || s.focusAt !== null) {
+        finishMotion()
+        requestDraw()
+      }
+    }
+    window.addEventListener('pointerdown', onInput, true)
+    window.addEventListener('keydown', onInput, true)
+    return () => {
+      window.removeEventListener('pointerdown', onInput, true)
+      window.removeEventListener('keydown', onInput, true)
+    }
+  }, [s, finishMotion, requestDraw])
 
   // -------------------------------------------------------------------------
   // Framing (10.2)
@@ -404,17 +583,31 @@ export function GraphCanvas(props: GraphCanvasProps) {
     s.sceneVersion++
     if (s.hover >= 0 && !scene.nodes[s.hover]?.visible) s.hover = -1
     s.hoverEdges = s.hover >= 0 && !scene.input.presentation.dimming ? hoverEdges(scene, s.hover) : null
+    const now = performance.now()
+    const nextFocus = scene.input.presentation.role.indexOf('focus')
+    const prevFocus = prev ? prev.input.presentation.role.indexOf('focus') : -1
+    const animate = animates() && !!prev && prev.input.topology === scene.input.topology
+    // A newly selected course: its ring scales 0.6 → 1 and its plate fades in (17).
+    const focusMotion = animate && nextFocus >= 0 && nextFocus !== prevFocus
     if (!prev || !s.width || sameLayout(prev.input.geometry, scene.input.geometry)) {
+      // Same boxes (an edge-only toggle, the theme, the record): a running tween carries on towards
+      // the new scene; theme changes are instant on the canvas.
+      if (s.geo && prev && prev.input.topology === scene.input.topology) s.geo.to = scene
+      if (focusMotion) {
+        s.focusAt = now
+        s.unarmed.add('focus')
+      }
       requestDraw()
       return
     }
     const plot = currentPlot()
-    const now = performance.now()
-    const startView = s.tween ? s.tween.toView : s.view
+    const startView = s.pan ? V.viewMotionEnd(s.pan) : s.view
     let view = startView
+    /** Click selection: the nudged view, reached on its own timing after anchoring (10.4, 17). */
+    let nudged: V.View | null = null
     let handled = false
-    let motion = MOTION.geometry
-    const nextFocus = scene.input.presentation.role.indexOf('focus')
+    // Anchoring follows the geometry tween exactly (same clock and easing); framing has its own.
+    let motion: { duration: number; ease: V.Ease } = MOTION.geometry
     const anchor = s.anchor && s.anchor.until > now ? s.anchor : null
     if (anchor && (anchor.kind === 'clear' ? nextFocus < 0 : nextFocus === anchor.target)) {
       s.anchor = null
@@ -423,8 +616,9 @@ export function GraphCanvas(props: GraphCanvasProps) {
         view = V.anchorView(view, plot, anchor.screen, { x: box.cx, y: box.cy })
         if (anchor.kind === 'select') {
           if (view.zoom < V.CLICK_MIN_ZOOM) view = V.zoomAround(view, V.FRAME_ZOOM_FLOOR, anchor.screen.x, anchor.screen.y, plot)
+          view = V.clampView(view, scene.world, plot)
           const chain = unionRects(scene.nodes.filter(n => n.visible && CHAIN_ROLES.has(n.role)).map(n => nodeRect(scene, n.index)))
-          if (chain) view = V.nudgeIntoView(V.clampView(view, scene.world, plot), plot, chain, nodeRect(scene, anchor.index))
+          if (chain) nudged = V.clampView(V.nudgeIntoView(view, plot, chain, nodeRect(scene, anchor.index)), scene.world, plot)
         }
         handled = true
       }
@@ -432,6 +626,7 @@ export function GraphCanvas(props: GraphCanvasProps) {
         const framed = frameTarget('chain', scene)
         if (framed) {
           view = framed
+          nudged = null
           motion = MOTION.frame
           handled = true
         }
@@ -443,6 +638,7 @@ export function GraphCanvas(props: GraphCanvasProps) {
         // Applied once: later geometry changes (toolbar toggles) anchor instead of reframing.
         s.pendingFrame = null
         view = framed
+        motion = MOTION.frame
         handled = true
       }
     }
@@ -452,9 +648,8 @@ export function GraphCanvas(props: GraphCanvasProps) {
       const nextGeometry = scene.input.geometry
       const onScreen = (i: number) => prev.nodes[i]?.visible && V.pointInPlot(startView, plot, { x: prevGeometry.nodes[i].cx, y: prevGeometry.nodes[i].cy })
       let ref = -1
-      const f = prev.input.presentation.role.indexOf('focus')
-      if (f >= 0 && scene.nodes[f]?.visible && onScreen(f)) {
-        ref = f
+      if (prevFocus >= 0 && scene.nodes[prevFocus]?.visible && onScreen(prevFocus)) {
+        ref = prevFocus
       } else {
         const cx = V.toWorldX(startView, plot, plot.left + plot.width / 2)
         const cy = V.toWorldY(startView, plot, plot.top + plot.height / 2)
@@ -474,24 +669,40 @@ export function GraphCanvas(props: GraphCanvasProps) {
       }
     }
     view = V.clampView(view, scene.world, plot)
-    const before = startView.zoom
-    if (motionAllowed(latest.current.props.motion)) {
-      s.tween = {
+    const final = nudged ?? view
+    if (animate) {
+      // An interrupted tween continues from what is on screen (positions, radii, label opacity).
+      const from = s.geo && s.moving && s.shown ? s.shown : prev
+      s.geo = { start: now, from, to: scene, labelStart: s.geo && s.moving ? s.shownLabels : 1 }
+      s.moving = true
+      // The pan runs on the geometry's clock and easing, framing included (a framing pan on its own
+      // timing swung the chain out of the plot while lanes collapsed, visual QA).
+      s.pan = {
         start: now,
-        duration: motion.duration,
-        ease: motion.ease,
-        fromView: s.view,
-        toView: view,
-        fromGeometry: s.tween?.fromGeometry && s.shown ? s.shown : prev.input.geometry,
-        toGeometry: scene.input.geometry,
+        from: s.view,
+        to: view,
+        duration: MOTION.geometry.duration,
+        ease: MOTION.geometry.ease,
+        nudge: nudged && (nudged.x !== view.x || nudged.y !== view.y) ? { dx: nudged.x - view.x, dy: nudged.y - view.y, ...MOTION.nudge } : undefined,
+      }
+      s.unarmed.add('geo').add('pan')
+      if (focusMotion) {
+        s.focusAt = now
+        s.unarmed.add('focus')
+      } else if (nextFocus < 0) s.focusAt = null
+      if (overlayRowsChange(from.input.geometry, scene.input.geometry)) {
+        s.overlayHeld = true
+        setOverlayFrom(from.input.geometry)
       }
     } else {
-      s.tween = null
-      s.view = view
+      finishMotion()
+      s.view = final
     }
-    if (view.zoom !== before) latest.current.props.onZoomChange?.(view.zoom)
+    // The first geometry framed for a pending request (landing on a hash course) ends the landing.
+    if (handled && motion === MOTION.frame) s.landed = true
+    if (final.zoom !== startView.zoom) latest.current.props.onZoomChange?.(final.zoom)
     drawNow()
-  }, [scene, s, currentPlot, frameTarget, requestDraw, drawNow])
+  }, [scene, s, currentPlot, frameTarget, requestDraw, drawNow, animates, finishMotion])
 
   // Selection announcements and the keyboard cursor follow the focus.
   useEffect(() => {
@@ -578,6 +789,7 @@ export function GraphCanvas(props: GraphCanvasProps) {
     const onWheel = (event: WheelEvent) => {
       if ((event.target as Element | null)?.closest?.('.gc-lane-menu, .gc-tooltip')) return
       event.preventDefault()
+      s.landed = true
       settle()
       hideTip()
       const plot = currentPlot()
@@ -668,6 +880,8 @@ export function GraphCanvas(props: GraphCanvasProps) {
     s.hover = index
     s.hoverJunction = junction
     s.hoverEdges = index >= 0 && !L.sceneInput.presentation.dimming ? hoverEdges(L.scene, index) : null
+    // The hover ring fades in over 80 ms (17; short enough to stay under reduced motion).
+    s.hoverAt = changedNode && index >= 0 && shortFadesAllowed(L.props.motion) ? performance.now() : null
     const canvas = canvasRef.current
     if (canvas && !s.drag?.moved) canvas.style.cursor = index >= 0 ? 'pointer' : ''
     if (changedNode) L.props.onHover?.(index >= 0 ? L.props.topology.nodes[index].id : null)
@@ -675,7 +889,7 @@ export function GraphCanvas(props: GraphCanvasProps) {
     if (index >= 0 || junction >= 0) {
       s.tipTimer = window.setTimeout(() => {
         if (s.pointer && !s.drag) showTip(index, junction, s.pointer)
-      }, TOOLTIP_DELAY)
+      }, MOTION.hover.delay)
     }
     requestDraw()
   }, [s, hideTip, showTip, requestDraw])
@@ -706,9 +920,20 @@ export function GraphCanvas(props: GraphCanvasProps) {
       d.lastY = event.clientY
       return
     }
+    // While dots are still moving, the end layout is not what is on screen: hit-test once it settles.
+    if (s.moving) return
     const hit = hitAt(p)
     setHover(hit, hit < 0 ? junctionAt(p) : -1)
   }
+
+  useEffect(() => {
+    refreshHover.current = () => {
+      const p = s.pointer
+      if (!p || s.drag || s.moving) return
+      const hit = hitAt(p)
+      setHover(hit, hit < 0 ? junctionAt(p) : -1)
+    }
+  })
 
   const onPointerUp = (event: ReactPointerEvent<HTMLCanvasElement>) => {
     const d = s.drag
@@ -880,12 +1105,22 @@ export function GraphCanvas(props: GraphCanvasProps) {
     setView(V.zoomAtCentre(s.view, V.stepZoom(s.view.zoom, direction), currentPlot()))
   }, [s, settle, setView, currentPlot])
 
+  /**
+   * View requests made by the app (framing, lane jumps) retarget the view only: a geometry tween
+   * that the same state change started keeps running (user input has already ended older ones).
+   */
+  const retarget = useCallback(() => {
+    s.anchor = null
+    s.pendingFrame = null
+  }, [s])
+
   const scrollLaneTo = useCallback((laneIndex: number, top: number) => {
     const box = latest.current.sceneInput.geometry.lanes[laneIndex]
     if (!box) return
-    settle()
-    setView({ ...s.view, y: box.y - top / s.view.zoom }, MOTION.frame)
-  }, [s, settle, setView])
+    retarget()
+    const end = s.pan ? V.viewMotionEnd(s.pan) : s.view
+    setView({ ...end, y: box.y - top / end.zoom }, MOTION.frame)
+  }, [s, retarget, setView])
 
   useImperativeHandle(ref, (): GraphCanvasHandle => ({
     zoomIn: () => zoomStep(1),
@@ -899,7 +1134,7 @@ export function GraphCanvas(props: GraphCanvasProps) {
       setView(V.fitWidthView(s.view, latest.current.scene.world, currentPlot()), MOTION.frame)
     },
     frame: target => {
-      settle()
+      retarget()
       // Framed now when possible; otherwise the next geometry (within FRAME_TTL) is framed once.
       const view = frameTarget(target, latest.current.scene)
       s.pendingFrame = view ? null : { target, until: performance.now() + FRAME_TTL }
@@ -917,8 +1152,8 @@ export function GraphCanvas(props: GraphCanvasProps) {
       const lane = latest.current.props.topology.lanes.findIndex(l => l.subject === subject)
       if (lane >= 0) scrollLaneTo(lane, LANE_JUMP_TOP)
     },
-    getZoom: () => (s.tween ? s.tween.toView.zoom : s.view.zoom),
-  }), [s, zoomStep, settle, setView, currentPlot, frameTarget, scrollLaneTo])
+    getZoom: () => (s.pan ? V.viewMotionEnd(s.pan).zoom : s.view.zoom),
+  }), [s, zoomStep, settle, retarget, setView, currentPlot, frameTarget, scrollLaneTo])
 
   // -------------------------------------------------------------------------
   // Overlay callbacks
@@ -959,6 +1194,7 @@ export function GraphCanvas(props: GraphCanvasProps) {
       aria-roledescription={strings.regionRole}
       aria-label={format(strings.regionLabel, { n: courseCount })}
       tabIndex={0}
+      data-motion={props.motion ? 'on' : undefined}
       onKeyDown={onKeyDown}
       onFocus={onFocus}
       onBlur={onBlur}
@@ -977,7 +1213,7 @@ export function GraphCanvas(props: GraphCanvasProps) {
       <BandBar
         bus={bus}
         topology={topology}
-        geometry={geometry}
+        geometry={overlayGeo}
         counts={bands}
         focus={focus}
         programActive={programActive}
@@ -989,7 +1225,7 @@ export function GraphCanvas(props: GraphCanvasProps) {
       <LaneColumn
         bus={bus}
         topology={topology}
-        geometry={geometry}
+        geometry={overlayGeo}
         counts={lanes}
         focus={focus}
         programActive={programActive}

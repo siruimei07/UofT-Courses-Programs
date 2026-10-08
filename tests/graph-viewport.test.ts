@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import {
-  FRAME_MARGIN_X, FRAME_MARGIN_Y, FRAME_ZOOM_FLOOR, SCROLLBAR_CLEARANCE, ZOOM_MAX, ZOOM_MIN, anchorView, centerOnPoint, clampView, clampZoom,
-  countHidden, cubicBezier, fitWidthView, frameView, hiddenSide, lerpView, nudgeIntoView, revealSide, scrollThumb, stepZoom,
-  toScreenX, toScreenY, toWorldX, toWorldY, viewFromThumb, visibleWorld, zoomAround, zoomAtCentre,
+  EASE_EMPHASIS, EASE_STANDARD, FRAME_MARGIN_X, FRAME_MARGIN_Y, FRAME_ZOOM_FLOOR, GEOMETRY_SEQUENCE_MS, MOTION, SCROLLBAR_CLEARANCE, ZOOM_MAX,
+  ZOOM_MIN, anchorView, centerOnPoint, clampView, clampZoom, countHidden, cubicBezier, fitWidthView, focusPhase, frameView, geometryPhase,
+  hiddenSide, lerpView, nudgeIntoView, progress, revealSide, scrollThumb, stepZoom, toScreenX, toScreenY, toWorldX, toWorldY, tweenView,
+  viewAt, viewFromThumb, viewMotionEnd, visibleWorld, zoomAround, zoomAtCentre,
 } from '../src/graph/viewport'
 import type { PillTarget, Plot, Rect, View, World } from '../src/graph/viewport'
 
@@ -269,17 +270,147 @@ describe('scrollbars (9.4)', () => {
   })
 })
 
-describe('motion helpers', () => {
-  it('eases from 0 to 1 monotonically', () => {
-    const ease = cubicBezier(0.2, 0, 0, 1)
-    expect(ease(0)).toBe(0)
-    expect(ease(1)).toBe(1)
-    let last = 0
-    for (let t = 0.05; t < 1; t += 0.05) {
-      const e = ease(t)
-      expect(e).toBeGreaterThanOrEqual(last)
-      last = e
+describe('motion helpers (design-spec 17, owner decision 13)', () => {
+  /** Reference cubic-bezier by bisection on the curve parameter (independent of the Newton solver). */
+  function reference(x1: number, y1: number, x2: number, y2: number, x: number): number {
+    const bez = (a: number, b: number, t: number) => 3 * a * t * (1 - t) ** 2 + 3 * b * t * t * (1 - t) + t ** 3
+    let lo = 0
+    let hi = 1
+    for (let i = 0; i < 60; i++) {
+      const mid = (lo + hi) / 2
+      if (bez(x1, x2, mid) < x) lo = mid
+      else hi = mid
     }
+    return bez(y1, y2, (lo + hi) / 2)
+  }
+
+  it('eases from 0 to 1 monotonically and matches the CSS cubic-bezier curves', () => {
+    for (const [ease, args] of [[EASE_EMPHASIS, [0.2, 0, 0, 1]], [EASE_STANDARD, [0.4, 0, 0.2, 1]], [cubicBezier(0.25, 0.1, 0.25, 1), [0.25, 0.1, 0.25, 1]]] as const) {
+      expect(ease(0)).toBe(0)
+      expect(ease(1)).toBe(1)
+      expect(ease(-0.5)).toBe(0)
+      expect(ease(1.5)).toBe(1)
+      expect(ease(Number.NaN)).toBe(0)
+      let last = 0
+      for (let t = 0.01; t < 1; t += 0.01) {
+        const e = ease(t)
+        expect(e).toBeGreaterThanOrEqual(last - 1e-9)
+        expect(e).toBeCloseTo(reference(args[0], args[1], args[2], args[3], t), 4)
+        last = e
+      }
+    }
+    // The CSS "ease" keyword at its midpoint (a widely published value).
+    expect(cubicBezier(0.25, 0.1, 0.25, 1)(0.5)).toBeCloseTo(0.8024, 3)
+    // Emphasis decelerates hard: most of the move happens early.
+    expect(EASE_EMPHASIS(0.25)).toBeGreaterThan(0.5)
+  })
+
+  it('uses the durations and easings of the motion table', () => {
+    expect(MOTION.geometry).toEqual({ duration: 260, ease: EASE_EMPHASIS })
+    expect(MOTION.labelsOut).toEqual({ delay: 0, duration: 100 })
+    expect(MOTION.labelsIn).toEqual({ delay: 100, duration: 160 })
+    expect(MOTION.edges).toEqual({ direct: 0, transitive: 60, duration: 160 })
+    expect(MOTION.focus).toEqual({ duration: 180, ease: EASE_EMPHASIS, from: 0.6, plate: 120 })
+    expect(MOTION.frame).toEqual({ duration: 320, ease: EASE_STANDARD })
+    expect(MOTION.nudge).toEqual({ duration: 220, ease: EASE_STANDARD })
+    expect(MOTION.hover).toEqual({ ring: 80, delay: 350, tooltip: 120 })
+    expect(MOTION.pill.fade).toBe(160)
+    expect(GEOMETRY_SEQUENCE_MS).toBe(260 + 60 + 160)
+  })
+
+  it('measures linear progress after a delay', () => {
+    expect(progress(-5, 0, 100)).toBe(0)
+    expect(progress(50, 0, 100)).toBe(0.5)
+    expect(progress(130, 100, 160)).toBeCloseTo(30 / 160, 12)
+    expect(progress(500, 100, 160)).toBe(1)
+    expect(progress(99, 100, 0)).toBe(0)
+    expect(progress(100, 100, 0)).toBe(1)
+  })
+
+  it('sequences a geometry change: tween, labels out then in, then direct and transitive edges', () => {
+    const at = (ms: number, start?: number) => geometryPhase(ms, start)
+    expect(at(0)).toEqual({ t: 0, moving: true, labels: 'from', labelAlpha: 1, direct: 0, transitive: 0, done: false })
+    expect(at(50)).toMatchObject({ labels: 'from', labelAlpha: 0.5, direct: 0, transitive: 0 })
+    expect(at(50).t).toBeCloseTo(EASE_EMPHASIS(50 / 260), 12)
+    // The switch at 100 ms is continuous: the old labels are gone, the new ones not yet visible.
+    expect(at(99.999).labelAlpha).toBeCloseTo(0, 3)
+    expect(at(100)).toMatchObject({ labels: 'to', labelAlpha: 0 })
+    expect(at(180)).toMatchObject({ labels: 'to', labelAlpha: 0.5, moving: true })
+    expect(at(260)).toEqual({ t: 1, moving: false, labels: 'to', labelAlpha: 1, direct: 0, transitive: 0, done: false })
+    expect(at(340)).toMatchObject({ direct: 0.5, transitive: 20 / 160, done: false })
+    expect(at(420)).toMatchObject({ direct: 1, transitive: 0.625, done: false })
+    expect(at(GEOMETRY_SEQUENCE_MS)).toMatchObject({ direct: 1, transitive: 1, labelAlpha: 1, done: true })
+    // An interrupting change fades the labels on screen from their current opacity.
+    expect(at(50, 0.4).labelAlpha).toBeCloseTo(0.2, 12)
+    // Invariants over the whole sequence, sampled every millisecond.
+    let lastT = 0
+    for (let ms = 0; ms <= GEOMETRY_SEQUENCE_MS + 20; ms++) {
+      const p = at(ms)
+      expect(p.t).toBeGreaterThanOrEqual(lastT)
+      lastT = p.t
+      if (p.moving) expect([p.direct, p.transitive]).toEqual([0, 0])
+      expect(p.transitive).toBeLessThanOrEqual(p.direct)
+      expect(p.labelAlpha).toBeGreaterThanOrEqual(0)
+      expect(p.labelAlpha).toBeLessThanOrEqual(1)
+      expect(p.done).toBe(ms >= GEOMETRY_SEQUENCE_MS)
+    }
+  })
+
+  it('grows a new focus ring from 0.6 over 180 ms and fades its plate in over 120 ms', () => {
+    expect(focusPhase(0)).toEqual({ scale: 0.6, plate: 0, done: false })
+    expect(focusPhase(60)).toMatchObject({ plate: 0.5 })
+    expect(focusPhase(60).scale).toBeCloseTo(0.6 + 0.4 * EASE_EMPHASIS(60 / 180), 12)
+    expect(focusPhase(120)).toMatchObject({ plate: 1, done: false })
+    expect(focusPhase(180)).toEqual({ scale: 1, plate: 1, done: true })
+  })
+
+  it('tweens views: anchored points stay put without a zoom change; with one, the shared point stays fixed', () => {
+    const from: View = { zoom: 1, x: 300, y: 400 }
+    const to: View = { zoom: 1, x: 420, y: 340 }
+    // A node whose world position moves with the same easing as the view keeps its screen position.
+    const node0 = { x: 900, y: 700 }
+    const node1 = { x: node0.x + (to.x - from.x), y: node0.y + (to.y - from.y) }
+    for (const t of [0, 0.2, 0.5, 0.9, 1]) {
+      const v = tweenView(from, to, t, plot)
+      const world = { x: node0.x + (node1.x - node0.x) * t, y: node0.y + (node1.y - node0.y) * t }
+      expect(screen(v, world.x, world.y).x).toBeCloseTo(screen(from, node0.x, node0.y).x, 9)
+      expect(screen(v, world.x, world.y).y).toBeCloseTo(screen(from, node0.x, node0.y).y, 9)
+    }
+    // Zooming about a point in the plot: that point stays fixed all the way.
+    const zoomed = zoomAround(from, 0.92, 800, 500, plot)
+    for (const t of [0.25, 0.5, 0.75]) {
+      const v = tweenView(from, zoomed, t, plot)
+      expect(toWorldX(v, plot, 800)).toBeCloseTo(toWorldX(from, plot, 800), 9)
+      expect(toWorldY(v, plot, 500)).toBeCloseTo(toWorldY(from, plot, 500), 9)
+    }
+    // A long pan with a zoom change moves the plot centre linearly; endpoints are exact.
+    const far: View = { zoom: 0.92, x: 4000, y: 6000 }
+    const mid = tweenView(from, far, 0.5, plot)
+    const centre = (v: View) => ({ x: toWorldX(v, plot, plot.left + plot.width / 2), y: toWorldY(v, plot, plot.top + plot.height / 2) })
+    expect(centre(mid).x).toBeCloseTo((centre(from).x + centre(far).x) / 2, 6)
+    expect(mid.zoom).toBeCloseTo(Math.sqrt(0.92), 9)
+    expect(tweenView(from, far, 0, plot)).toBe(from)
+    expect(tweenView(from, far, 1, plot)).toBe(far)
+  })
+
+  it('runs a click anchor and its nudge on their own clocks and ends exactly on the target', () => {
+    const motion = {
+      start: 1000,
+      from: { zoom: 1, x: 200, y: 300 },
+      to: { zoom: 1, x: 260, y: 300 },
+      duration: MOTION.geometry.duration,
+      ease: MOTION.geometry.ease,
+      nudge: { dx: 0, dy: 120, ...MOTION.nudge },
+    }
+    expect(viewMotionEnd(motion)).toEqual({ zoom: 1, x: 260, y: 420 })
+    expect(viewAt(motion, 1000, plot)).toEqual({ view: motion.from, done: false })
+    const mid = viewAt(motion, 1110, plot).view
+    expect(mid.x).toBeCloseTo(200 + 60 * EASE_EMPHASIS(110 / 260), 9)
+    expect(mid.y).toBeCloseTo(300 + 120 * EASE_STANDARD(110 / 220), 9)
+    // The nudge (220 ms) is over before the anchor (260 ms).
+    expect(viewAt(motion, 1230, plot)).toMatchObject({ view: { y: 420 }, done: false })
+    expect(viewAt(motion, 1260, plot)).toEqual({ view: { zoom: 1, x: 260, y: 420 }, done: true })
+    expect(viewAt({ ...motion, nudge: undefined }, 1260, plot)).toEqual({ view: motion.to, done: true })
   })
 
   it('interpolates views with geometric zoom', () => {

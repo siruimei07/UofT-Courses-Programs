@@ -611,6 +611,35 @@
   background: var(--hover);
 }
 
+/* Motion (17): pills fade in over 160 ms when they appear; the tooltip fades in over 120 ms after
+   its 350 ms rest. Only with the motion prop (data-motion) and never under reduced motion. Canvas
+   motion lives in GraphCanvas; theme changes stay instant on the canvas. */
+@media (prefers-reduced-motion: no-preference) {
+  .gc-root[data-motion] .gc-pill {
+    transition: opacity 160ms linear;
+  }
+
+  @starting-style {
+    .gc-root[data-motion] .gc-pill {
+      opacity: 0;
+    }
+  }
+
+  .gc-root[data-motion] .gc-tooltip {
+    animation: gc-fade-in 120ms linear both;
+  }
+}
+
+@keyframes gc-fade-in {
+  from {
+    opacity: 0;
+  }
+
+  to {
+    opacity: 1;
+  }
+}
+
 /* Tooltip (6.9.4) -------------------------------------------------------- */
 
 .gc-tooltip {

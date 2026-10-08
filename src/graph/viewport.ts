@@ -335,10 +335,13 @@ export function viewFromThumb(origin: number, extent: number, viewSpan: number, 
 }
 
 // ---------------------------------------------------------------------------
-// Motion helpers (17)
+// Motion helpers (17, owner decision 13). Pure timing: the canvas loop asks these what to draw at
+// a given number of milliseconds into a sequence.
 
-/** cubic-bezier(x1, y1, x2, y2) easing, solved with Newton steps on x. */
-export function cubicBezier(x1: number, y1: number, x2: number, y2: number): (t: number) => number {
+export type Ease = (t: number) => number
+
+/** cubic-bezier(x1, y1, x2, y2) easing: Newton steps on x, bisection where they do not converge. */
+export function cubicBezier(x1: number, y1: number, x2: number, y2: number): Ease {
   const cx = 3 * x1
   const bx = 3 * (x2 - x1) - cx
   const ax = 1 - cx - bx
@@ -349,29 +352,173 @@ export function cubicBezier(x1: number, y1: number, x2: number, y2: number): (t:
   const sampleY = (t: number) => ((ay * t + by) * t + cy) * t
   const slopeX = (t: number) => (3 * ax * t + 2 * bx) * t + cx
   return (x: number) => {
-    if (x <= 0) return 0
+    if (!(x > 0)) return 0
     if (x >= 1) return 1
     let t = x
     for (let i = 0; i < 8; i++) {
       const err = sampleX(t) - x
-      if (Math.abs(err) < 1e-5) break
+      if (Math.abs(err) < 1e-6) return sampleY(t)
       const d = slopeX(t)
       if (Math.abs(d) < 1e-6) break
-      t -= err / d
+      t = clamp(t - err / d, 0, 1)
     }
-    return sampleY(clamp(t, 0, 1))
+    let lo = 0
+    let hi = 1
+    t = x
+    for (let i = 0; i < 40 && hi - lo > 1e-7; i++) {
+      if (sampleX(t) < x) lo = t
+      else hi = t
+      t = (lo + hi) / 2
+    }
+    return sampleY(t)
   }
 }
 
+/** Geometry changes and the focus glyph: cubic-bezier(0.2, 0, 0, 1). */
 export const EASE_EMPHASIS = cubicBezier(0.2, 0, 0, 1)
+/** Framing, nudges and pill pans: cubic-bezier(0.4, 0, 0.2, 1). */
 export const EASE_STANDARD = cubicBezier(0.4, 0, 0.2, 1)
+export const EASE_LINEAR: Ease = t => clamp(t, 0, 1)
+
+/** Durations (ms) and easings of design-spec 17. */
+export const MOTION = {
+  /** Select, clear, filter, Titles: node centres, dot radii and lane / column / band boxes. */
+  geometry: { duration: 260, ease: EASE_EMPHASIS },
+  /** During the geometry tween the old labels fade out, then the new ones fade in. */
+  labelsOut: { delay: 0, duration: 100 },
+  labelsIn: { delay: 100, duration: 160 },
+  /** Chain edges are hidden during the tween, then fade in (opacity only): direct at 0, transitive at +60 ms. */
+  edges: { direct: 0, transitive: 60, duration: 160 },
+  /** Focus glyph: the ring scales 0.6 → 1, the plate fades in. */
+  focus: { duration: 180, ease: EASE_EMPHASIS, from: 0.6, plate: 120 },
+  /** Framing pan / zoom (hash, search, F, double-click) and pill-click pans. */
+  frame: { duration: 320, ease: EASE_STANDARD },
+  /** Click selection: the nudge that brings the chain into view after anchoring. */
+  nudge: { duration: 220, ease: EASE_STANDARD },
+  /** Hover ring fade; the tooltip (CSS) fades over 120 ms after the 350 ms rest. */
+  hover: { ring: 80, delay: 350, tooltip: 120 },
+  /** Edge-of-view pills fade in (CSS). */
+  pill: { fade: 160 },
+  /** Under prefers-reduced-motion only opacity fades this short remain. */
+  reducedFadeMax: 100,
+} as const
 
 export function lerp(a: number, b: number, t: number): number {
   return a + (b - a) * t
+}
+
+/** Linear progress (0 → 1) of a step that starts `delay` ms into a sequence and lasts `duration` ms. */
+export function progress(elapsed: number, delay: number, duration: number): number {
+  if (duration <= 0) return elapsed >= delay ? 1 : 0
+  return clamp((elapsed - delay) / duration, 0, 1)
+}
+
+/** What a geometry change shows `elapsed` ms after it started (17). */
+export interface GeometryPhase {
+  /** Eased geometry progress: 0 = previous layout, 1 = new layout. */
+  t: number
+  /** Still interpolating: chain edges stay hidden and the edge-of-view pills wait. */
+  moving: boolean
+  /** Labels drawn now: the previous ones (fading out) or the new ones (fading in). */
+  labels: 'from' | 'to'
+  labelAlpha: number
+  /** Opacity of the direct chain edges (and the faint overview texture) and of the transitive and program edges. */
+  direct: number
+  transitive: number
+  /** The whole sequence (tween, label fades, edge fades) is over. */
+  done: boolean
+}
+
+/**
+ * Sequencing of a geometry change: 260 ms tween; labels out over 100 ms, in over 160 ms after
+ * 100 ms; then the chain edges fade in over 160 ms, direct at 0 and transitive at +60 ms.
+ * `labelStart` is the opacity the outgoing labels had when the change started (a tween that
+ * interrupts another one continues from the labels on screen).
+ */
+export function geometryPhase(elapsed: number, labelStart = 1): GeometryPhase {
+  const { geometry, labelsIn, labelsOut, edges } = MOTION
+  const raw = progress(elapsed, 0, geometry.duration)
+  const moving = raw < 1
+  const incoming = elapsed >= labelsIn.delay
+  const labelAlpha = incoming
+    ? progress(elapsed, labelsIn.delay, labelsIn.duration)
+    : labelStart * (1 - progress(elapsed, labelsOut.delay, labelsOut.duration))
+  const after = elapsed - geometry.duration
+  const direct = moving ? 0 : progress(after, edges.direct, edges.duration)
+  const transitive = moving ? 0 : progress(after, edges.transitive, edges.duration)
+  return {
+    t: geometry.ease(raw),
+    moving,
+    labels: incoming ? 'to' : 'from',
+    labelAlpha,
+    direct,
+    transitive,
+    done: !moving && direct >= 1 && transitive >= 1,
+  }
+}
+
+/** Total length of a geometry change sequence (ms). */
+export const GEOMETRY_SEQUENCE_MS = MOTION.geometry.duration + Math.max(MOTION.edges.direct, MOTION.edges.transitive) + MOTION.edges.duration
+
+/** Focus glyph `elapsed` ms after a new course was selected: ring scale 0.6 → 1, plate opacity 0 → 1. */
+export function focusPhase(elapsed: number): { scale: number; plate: number; done: boolean } {
+  const F = MOTION.focus
+  const ring = progress(elapsed, 0, F.duration)
+  const plate = progress(elapsed, 0, F.plate)
+  return { scale: F.from + (1 - F.from) * F.ease(ring), plate, done: ring >= 1 && plate >= 1 }
 }
 
 /** Interpolates two views; zoom is interpolated geometrically so the motion feels even. */
 export function lerpView(from: View, to: View, t: number): View {
   const zoom = from.zoom * Math.pow(to.zoom / from.zoom, t)
   return { zoom, x: lerp(from.x, to.x, t), y: lerp(from.y, to.y, t) }
+}
+
+/**
+ * View at eased progress t of a pan / zoom. Without a zoom change the corner moves linearly (an
+ * anchored node then stays exactly where it is while the geometry tweens with the same easing).
+ * With a zoom change, per axis, the world point that sits at the same screen offset in both views
+ * stays put when it lies inside the plot (a zoom about it); otherwise the plot centre moves
+ * linearly while the zoom changes geometrically.
+ */
+export function tweenView(from: View, to: View, t: number, plot?: Plot): View {
+  if (t <= 0) return from
+  if (t >= 1) return to
+  if (Math.abs(from.zoom - to.zoom) < 1e-9 || !plot) return lerpView(from, to, t)
+  const zoom = from.zoom * Math.pow(to.zoom / from.zoom, t)
+  const axis = (a: number, b: number, span: number) => {
+    const fixed = (b - a) / (1 / from.zoom - 1 / to.zoom)
+    if (fixed >= 0 && fixed <= span) return a + fixed / from.zoom - fixed / zoom
+    const centre = lerp(a + span / 2 / from.zoom, b + span / 2 / to.zoom, t)
+    return centre - span / 2 / zoom
+  }
+  return { zoom, x: axis(from.x, to.x, plot.width), y: axis(from.y, to.y, plot.height) }
+}
+
+/** An animated view change: a main pan / zoom plus, for click selection, a nudge on its own timing (10.4). */
+export interface ViewMotion {
+  start: number
+  from: View
+  to: View
+  duration: number
+  ease: Ease
+  /** World-space shift added on top of `to` (zoom unchanged). */
+  nudge?: { dx: number; dy: number; duration: number; ease: Ease }
+}
+
+export function viewMotionEnd(motion: ViewMotion): View {
+  const { to, nudge } = motion
+  return nudge ? { zoom: to.zoom, x: to.x + nudge.dx, y: to.y + nudge.dy } : to
+}
+
+/** View of a motion at time `now` (same clock as `start`). */
+export function viewAt(motion: ViewMotion, now: number, plot?: Plot): { view: View; done: boolean } {
+  const elapsed = now - motion.start
+  const main = progress(elapsed, 0, motion.duration)
+  const shift = motion.nudge ? progress(elapsed, 0, motion.nudge.duration) : 1
+  if (main >= 1 && shift >= 1) return { view: viewMotionEnd(motion), done: true }
+  const view = tweenView(motion.from, motion.to, motion.ease(main), plot)
+  if (!motion.nudge) return { view, done: false }
+  const e = motion.nudge.ease(shift)
+  return { view: { zoom: view.zoom, x: view.x + motion.nudge.dx * e, y: view.y + motion.nudge.dy * e }, done: false }
 }

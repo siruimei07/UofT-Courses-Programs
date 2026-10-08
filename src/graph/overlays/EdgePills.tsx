@@ -112,7 +112,8 @@ export function EdgePills({ bus, targets, anchor, strings, lang, onReveal }: Edg
 
   const layout = useCallback((frame: FrameInfo) => {
     const { plot, view } = frame
-    const counts = targets.length ? countHidden(view, plot, targets) : null
+    // Counts belong to the settled layout: while a geometry tween runs the pills wait, then fade in (17).
+    const counts = targets.length && !frame.moving ? countHidden(view, plot, targets) : null
     const ax = anchor ? frame.toX(anchor.x) : plot.left + plot.width / 2
     const ay = anchor ? frame.toY(anchor.y) : plot.top + plot.height / 2
     const slots: Array<PillSlot & { el: HTMLButtonElement }> = []
