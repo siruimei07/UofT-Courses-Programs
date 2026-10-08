@@ -1,0 +1,744 @@
+{
+  "schemaVersion": 1,
+  "campus": "UTM",
+  "generatedAt": "2026-10-08T06:11:24Z",
+  "sources": [
+    "https://utm.calendar.utoronto.ca/course-search",
+    "https://utm.calendar.utoronto.ca/list-program-areas",
+    "https://utm.calendar.utoronto.ca/section/Anthropology",
+    "https://utm.calendar.utoronto.ca/section/Arabic",
+    "https://utm.calendar.utoronto.ca/section/Art",
+    "https://utm.calendar.utoronto.ca/section/Astronomy",
+    "https://utm.calendar.utoronto.ca/section/Biology",
+    "https://utm.calendar.utoronto.ca/section/Biomedical-Communications",
+    "https://utm.calendar.utoronto.ca/section/Chemistry",
+    "https://utm.calendar.utoronto.ca/section/Chinese",
+    "https://utm.calendar.utoronto.ca/section/Cinema-Studies",
+    "https://utm.calendar.utoronto.ca/section/Classical-Civilization",
+    "https://utm.calendar.utoronto.ca/section/Communication,-Culture,-Information-and-Technology",
+    "https://utm.calendar.utoronto.ca/section/Computer-Science",
+    "https://utm.calendar.utoronto.ca/section/Diaspora-and-Transnational-Studies",
+    "https://utm.calendar.utoronto.ca/section/Earth-Science",
+    "https://utm.calendar.utoronto.ca/section/Economics",
+    "https://utm.calendar.utoronto.ca/section/Education-Studies",
+    "https://utm.calendar.utoronto.ca/section/English",
+    "https://utm.calendar.utoronto.ca/section/Environmental-Management",
+    "https://utm.calendar.utoronto.ca/section/Forensic-Sciences",
+    "https://utm.calendar.utoronto.ca/section/French",
+    "https://utm.calendar.utoronto.ca/section/Geography",
+    "https://utm.calendar.utoronto.ca/section/German",
+    "https://utm.calendar.utoronto.ca/section/Greek",
+    "https://utm.calendar.utoronto.ca/section/Hindi",
+    "https://utm.calendar.utoronto.ca/section/History",
+    "https://utm.calendar.utoronto.ca/section/History-of-Religions",
+    "https://utm.calendar.utoronto.ca/section/Italian",
+    "https://utm.calendar.utoronto.ca/section/Language-Studies",
+    "https://utm.calendar.utoronto.ca/section/Language-Teaching-and-Learning",
+    "https://utm.calendar.utoronto.ca/section/Latin",
+    "https://utm.calendar.utoronto.ca/section/Linguistics",
+    "https://utm.calendar.utoronto.ca/section/Management",
+    "https://utm.calendar.utoronto.ca/section/Management-and-Innovation",
+    "https://utm.calendar.utoronto.ca/section/Mathematical-Sciences",
+    "https://utm.calendar.utoronto.ca/section/Persian",
+    "https://utm.calendar.utoronto.ca/section/Philosophy",
+    "https://utm.calendar.utoronto.ca/section/Physics",
+    "https://utm.calendar.utoronto.ca/section/Political-Science",
+    "https://utm.calendar.utoronto.ca/section/Psychology",
+    "https://utm.calendar.utoronto.ca/section/Sociology",
+    "https://utm.calendar.utoronto.ca/section/South-Asian-Humanities",
+    "https://utm.calendar.utoronto.ca/section/Spanish",
+    "https://utm.calendar.utoronto.ca/section/Statistics,-Applied",
+    "https://utm.calendar.utoronto.ca/section/Study-of-University-Pedagogy",
+    "https://utm.calendar.utoronto.ca/section/Theatre,-Drama-and-Performance-Studies",
+    "https://utm.calendar.utoronto.ca/section/Visual-Culture-and-Communication",
+    "https://utm.calendar.utoronto.ca/section/Women,-Gender-and-Sexuality-Studies",
+    "https://utm.calendar.utoronto.ca/course-search?field_department_value=Anthropology",
+    "https://utm.calendar.utoronto.ca/course-search?field_department_value=Biology",
+    "https://utm.calendar.utoronto.ca/course-search?field_department_value=Chemical+and+Physical+Sciences",
+    "https://utm.calendar.utoronto.ca/course-search?field_department_value=Communication%2C+Culture%2C+Information%2C+%26+Technology",
+    "https://utm.calendar.utoronto.ca/course-search?field_department_value=Economics",
+    "https://utm.calendar.utoronto.ca/course-search?field_department_value=English+and+Drama",
+    "https://utm.calendar.utoronto.ca/course-search?field_department_value=Forensic+Sciences",
+    "https://utm.calendar.utoronto.ca/course-search?field_department_value=Geography%2C+Geomatics+and+Environment",
+    "https://utm.calendar.utoronto.ca/course-search?field_department_value=Historical+Studies",
+    "https://utm.calendar.utoronto.ca/course-search?field_department_value=Language+Studies",
+    "https://utm.calendar.utoronto.ca/course-search?field_department_value=Management",
+    "https://utm.calendar.utoronto.ca/course-search?field_department_value=Management+and+Innovation",
+    "https://utm.calendar.utoronto.ca/course-search?field_department_value=Mathematical+and+Computational+Sciences",
+    "https://utm.calendar.utoronto.ca/course-search?field_department_value=Philosophy",
+    "https://utm.calendar.utoronto.ca/course-search?field_department_value=Political+Science",
+    "https://utm.calendar.utoronto.ca/course-search?field_department_value=Psychology",
+    "https://utm.calendar.utoronto.ca/course-search?field_department_value=Sociology",
+    "https://utm.calendar.utoronto.ca/course-search?field_department_value=Study+of+University+Pedagogy%2C+Institute+for+the",
+    "https://utm.calendar.utoronto.ca/course-search?field_department_value=Visual+Studies",
+    "https://utm.calendar.utoronto.ca/course/cbj481y5",
+    "https://utm.calendar.utoronto.ca/course/jal253h5",
+    "https://utm.calendar.utoronto.ca/course/jbc472h5",
+    "https://utm.calendar.utoronto.ca/course/jbh471h5",
+    "https://utm.calendar.utoronto.ca/course/jcb487y5",
+    "https://utm.calendar.utoronto.ca/course/jeg400y5",
+    "https://utm.calendar.utoronto.ca/course/jfl369h5",
+    "https://utm.calendar.utoronto.ca/course/jge378h5",
+    "https://utm.calendar.utoronto.ca/course/jlp285h5",
+    "https://utm.calendar.utoronto.ca/course/jpe251h5",
+    "https://utm.calendar.utoronto.ca/course/pun212y5",
+    "https://utm.calendar.utoronto.ca/course/san291y5",
+    "https://utm.calendar.utoronto.ca/course/urd212y5",
+    "https://utm.calendar.utoronto.ca/course/vst410h5",
+    "https://utm.calendar.utoronto.ca/course/wri410h5"
+  ],
+  "divisions": [
+    {
+      "id": "sciences",
+      "label": "Sciences"
+    },
+    {
+      "id": "social-sciences",
+      "label": "Social Sciences"
+    },
+    {
+      "id": "humanities",
+      "label": "Humanities"
+    },
+    {
+      "id": "professional",
+      "label": "Management & Professional"
+    },
+    {
+      "id": "interdisciplinary",
+      "label": "Interdisciplinary"
+    }
+  ],
+  "subjects": [
+    {
+      "code": "ANT",
+      "name": "Anthropology",
+      "department": "Department of Anthropology",
+      "division": "social-sciences",
+      "courseCount": 111,
+      "nameSource": "official",
+      "sourceUrl": "https://utm.calendar.utoronto.ca/section/Anthropology"
+    },
+    {
+      "code": "ARA",
+      "name": "Arabic",
+      "department": "Department of Language Studies",
+      "division": "humanities",
+      "courseCount": 10,
+      "nameSource": "official",
+      "sourceUrl": "https://utm.calendar.utoronto.ca/section/Arabic"
+    },
+    {
+      "code": "AST",
+      "name": "Astronomy",
+      "department": "Department of Chemical and Physical Sciences",
+      "division": "sciences",
+      "courseCount": 11,
+      "nameSource": "official",
+      "sourceUrl": "https://utm.calendar.utoronto.ca/section/Astronomy"
+    },
+    {
+      "code": "BIO",
+      "name": "Biology",
+      "department": "Department of Biology",
+      "division": "sciences",
+      "courseCount": 90,
+      "nameSource": "official",
+      "sourceUrl": "https://utm.calendar.utoronto.ca/section/Biology"
+    },
+    {
+      "code": "CBJ",
+      "name": "Joint Computer Science-Biology",
+      "department": "Department of Mathematical and Computational Sciences",
+      "division": "sciences",
+      "courseCount": 1,
+      "nameSource": "derived",
+      "sourceUrl": "https://utm.calendar.utoronto.ca/course/cbj481y5"
+    },
+    {
+      "code": "CCT",
+      "name": "Communication, Culture, Information and Technology",
+      "department": "Institute of Communication, Culture, Information and Technology",
+      "division": "professional",
+      "courseCount": 117,
+      "nameSource": "official",
+      "sourceUrl": "https://utm.calendar.utoronto.ca/section/Communication,-Culture,-Information-and-Technology"
+    },
+    {
+      "code": "CHI",
+      "name": "Chinese",
+      "department": "Department of Language Studies",
+      "division": "humanities",
+      "courseCount": 21,
+      "nameSource": "official",
+      "sourceUrl": "https://utm.calendar.utoronto.ca/section/Chinese"
+    },
+    {
+      "code": "CHM",
+      "name": "Chemistry",
+      "department": "Department of Chemical and Physical Sciences",
+      "division": "sciences",
+      "courseCount": 33,
+      "nameSource": "official",
+      "sourceUrl": "https://utm.calendar.utoronto.ca/section/Chemistry"
+    },
+    {
+      "code": "CIN",
+      "name": "Cinema Studies",
+      "department": "Department of Visual Studies",
+      "division": "humanities",
+      "courseCount": 37,
+      "nameSource": "official",
+      "sourceUrl": "https://utm.calendar.utoronto.ca/section/Cinema-Studies"
+    },
+    {
+      "code": "CLA",
+      "name": "Classical Civilization",
+      "department": "Department of Historical Studies",
+      "division": "humanities",
+      "courseCount": 46,
+      "nameSource": "official",
+      "sourceUrl": "https://utm.calendar.utoronto.ca/section/Classical-Civilization"
+    },
+    {
+      "code": "CPS",
+      "name": "Chemical and Physical Sciences",
+      "department": "Department of Chemical and Physical Sciences",
+      "division": "sciences",
+      "courseCount": 5,
+      "nameSource": "official",
+      "sourceUrl": "https://utm.calendar.utoronto.ca/course-search?field_department_value=Chemical+and+Physical+Sciences"
+    },
+    {
+      "code": "CSC",
+      "name": "Computer Science",
+      "department": "Department of Mathematical and Computational Sciences",
+      "division": "sciences",
+      "courseCount": 68,
+      "nameSource": "official",
+      "sourceUrl": "https://utm.calendar.utoronto.ca/section/Computer-Science"
+    },
+    {
+      "code": "DRE",
+      "name": "Drama",
+      "department": "Department of English and Drama",
+      "division": "humanities",
+      "courseCount": 34,
+      "nameSource": "official",
+      "sourceUrl": "https://utm.calendar.utoronto.ca/section/Theatre,-Drama-and-Performance-Studies"
+    },
+    {
+      "code": "DRS",
+      "name": "Drama Studio",
+      "department": "Department of English and Drama",
+      "division": "humanities",
+      "courseCount": 16,
+      "nameSource": "official",
+      "sourceUrl": "https://utm.calendar.utoronto.ca/section/Theatre,-Drama-and-Performance-Studies"
+    },
+    {
+      "code": "DTS",
+      "name": "Diaspora and Transnational Studies",
+      "department": "Department of Historical Studies",
+      "division": "humanities",
+      "courseCount": 4,
+      "nameSource": "official",
+      "sourceUrl": "https://utm.calendar.utoronto.ca/section/Diaspora-and-Transnational-Studies"
+    },
+    {
+      "code": "ECO",
+      "name": "Economics",
+      "department": "Department of Economics",
+      "division": "social-sciences",
+      "courseCount": 71,
+      "nameSource": "official",
+      "sourceUrl": "https://utm.calendar.utoronto.ca/section/Economics"
+    },
+    {
+      "code": "EDS",
+      "name": "Education Studies",
+      "department": "Department of Language Studies",
+      "division": "humanities",
+      "courseCount": 17,
+      "nameSource": "official",
+      "sourceUrl": "https://utm.calendar.utoronto.ca/section/Education-Studies"
+    },
+    {
+      "code": "ENG",
+      "name": "English",
+      "department": "Department of English and Drama",
+      "division": "humanities",
+      "courseCount": 163,
+      "nameSource": "official",
+      "sourceUrl": "https://utm.calendar.utoronto.ca/section/English"
+    },
+    {
+      "code": "ENV",
+      "name": "Environment",
+      "department": "Department of Geography, Geomatics and Environment",
+      "division": "social-sciences",
+      "courseCount": 23,
+      "nameSource": "derived",
+      "sourceUrl": "https://utm.calendar.utoronto.ca/section/Environmental-Management"
+    },
+    {
+      "code": "ERS",
+      "name": "Earth Science",
+      "department": "Department of Chemical and Physical Sciences",
+      "division": "sciences",
+      "courseCount": 29,
+      "nameSource": "official",
+      "sourceUrl": "https://utm.calendar.utoronto.ca/section/Earth-Science"
+    },
+    {
+      "code": "FAH",
+      "name": "Fine Art History",
+      "department": "Department of Visual Studies",
+      "division": "humanities",
+      "courseCount": 83,
+      "nameSource": "official",
+      "sourceUrl": "https://utm.calendar.utoronto.ca/section/Art"
+    },
+    {
+      "code": "FAS",
+      "name": "Fine Art Studio",
+      "department": "Department of Visual Studies",
+      "division": "humanities",
+      "courseCount": 33,
+      "nameSource": "official",
+      "sourceUrl": "https://utm.calendar.utoronto.ca/section/Art"
+    },
+    {
+      "code": "FRE",
+      "name": "French",
+      "department": "Department of Language Studies",
+      "division": "humanities",
+      "courseCount": 55,
+      "nameSource": "official",
+      "sourceUrl": "https://utm.calendar.utoronto.ca/section/French"
+    },
+    {
+      "code": "FSC",
+      "name": "Forensic Science",
+      "department": "Institute of Forensic Sciences",
+      "division": "sciences",
+      "courseCount": 45,
+      "nameSource": "official",
+      "sourceUrl": "https://utm.calendar.utoronto.ca/section/Forensic-Sciences"
+    },
+    {
+      "code": "FSL",
+      "name": "Functional French",
+      "department": "Department of Language Studies",
+      "division": "humanities",
+      "courseCount": 10,
+      "nameSource": "official",
+      "sourceUrl": "https://utm.calendar.utoronto.ca/section/French"
+    },
+    {
+      "code": "GER",
+      "name": "German",
+      "department": "Department of Language Studies",
+      "division": "humanities",
+      "courseCount": 20,
+      "nameSource": "official",
+      "sourceUrl": "https://utm.calendar.utoronto.ca/section/German"
+    },
+    {
+      "code": "GGR",
+      "name": "Geography",
+      "department": "Department of Geography, Geomatics and Environment",
+      "division": "social-sciences",
+      "courseCount": 79,
+      "nameSource": "official",
+      "sourceUrl": "https://utm.calendar.utoronto.ca/section/Geography"
+    },
+    {
+      "code": "GLB",
+      "name": "Global Leadership",
+      "department": "Department of Language Studies",
+      "division": "interdisciplinary",
+      "courseCount": 1,
+      "nameSource": "official",
+      "sourceUrl": "https://utm.calendar.utoronto.ca/section/Language-Studies"
+    },
+    {
+      "code": "GRK",
+      "name": "Greek",
+      "department": "Department of Historical Studies",
+      "division": "humanities",
+      "courseCount": 4,
+      "nameSource": "official",
+      "sourceUrl": "https://utm.calendar.utoronto.ca/section/Greek"
+    },
+    {
+      "code": "HIN",
+      "name": "Hindi",
+      "department": "Department of Language Studies",
+      "division": "humanities",
+      "courseCount": 7,
+      "nameSource": "official",
+      "sourceUrl": "https://utm.calendar.utoronto.ca/section/Hindi"
+    },
+    {
+      "code": "HIS",
+      "name": "History",
+      "department": "Department of Historical Studies",
+      "division": "humanities",
+      "courseCount": 115,
+      "nameSource": "official",
+      "sourceUrl": "https://utm.calendar.utoronto.ca/section/History"
+    },
+    {
+      "code": "HSC",
+      "name": "Biomedical Communications",
+      "department": "Department of Biology",
+      "division": "sciences",
+      "courseCount": 12,
+      "nameSource": "official",
+      "sourceUrl": "https://utm.calendar.utoronto.ca/section/Biomedical-Communications"
+    },
+    {
+      "code": "IMI",
+      "name": "Management and Innovation",
+      "department": "Institute for Management and Innovation",
+      "division": "professional",
+      "courseCount": 10,
+      "nameSource": "official",
+      "sourceUrl": "https://utm.calendar.utoronto.ca/section/Management-and-Innovation"
+    },
+    {
+      "code": "ISP",
+      "name": "Study of University Pedagogy",
+      "department": "Institute for the Study of University Pedagogy",
+      "division": "interdisciplinary",
+      "courseCount": 27,
+      "nameSource": "official",
+      "sourceUrl": "https://utm.calendar.utoronto.ca/section/Study-of-University-Pedagogy"
+    },
+    {
+      "code": "ITA",
+      "name": "Italian",
+      "department": "Department of Language Studies",
+      "division": "humanities",
+      "courseCount": 60,
+      "nameSource": "official",
+      "sourceUrl": "https://utm.calendar.utoronto.ca/section/Italian"
+    },
+    {
+      "code": "JAL",
+      "name": "Joint Anthropology-Linguistics",
+      "department": "Department of Language Studies",
+      "division": "interdisciplinary",
+      "courseCount": 4,
+      "nameSource": "derived",
+      "sourceUrl": "https://utm.calendar.utoronto.ca/course/jal253h5"
+    },
+    {
+      "code": "JBC",
+      "name": "Joint Biology-Chemistry",
+      "department": "Department of Biology",
+      "division": "sciences",
+      "courseCount": 1,
+      "nameSource": "derived",
+      "sourceUrl": "https://utm.calendar.utoronto.ca/course/jbc472h5"
+    },
+    {
+      "code": "JBH",
+      "name": "Joint Biology-History",
+      "department": "Department of Biology",
+      "division": "interdisciplinary",
+      "courseCount": 1,
+      "nameSource": "derived",
+      "sourceUrl": "https://utm.calendar.utoronto.ca/course/jbh471h5"
+    },
+    {
+      "code": "JCB",
+      "name": "Joint Chemical and Physical Sciences-Biology",
+      "department": "Department of Chemical and Physical Sciences",
+      "division": "sciences",
+      "courseCount": 1,
+      "nameSource": "derived",
+      "sourceUrl": "https://utm.calendar.utoronto.ca/course/jcb487y5"
+    },
+    {
+      "code": "JCP",
+      "name": "Joint Chemistry-Physics",
+      "department": "Department of Chemical and Physical Sciences",
+      "division": "sciences",
+      "courseCount": 6,
+      "nameSource": "official",
+      "sourceUrl": "https://utm.calendar.utoronto.ca/section/Chemistry"
+    },
+    {
+      "code": "JEG",
+      "name": "Joint Environment-Geography",
+      "department": "Department of Geography, Geomatics and Environment",
+      "division": "social-sciences",
+      "courseCount": 3,
+      "nameSource": "derived",
+      "sourceUrl": "https://utm.calendar.utoronto.ca/course/jeg400y5"
+    },
+    {
+      "code": "JFL",
+      "name": "Joint French-Linguistics",
+      "department": "Department of Language Studies",
+      "division": "humanities",
+      "courseCount": 3,
+      "nameSource": "derived",
+      "sourceUrl": "https://utm.calendar.utoronto.ca/course/jfl369h5"
+    },
+    {
+      "code": "JGE",
+      "name": "Joint Geography-Earth Science",
+      "department": "Department of Geography, Geomatics and Environment",
+      "division": "interdisciplinary",
+      "courseCount": 1,
+      "nameSource": "derived",
+      "sourceUrl": "https://utm.calendar.utoronto.ca/course/jge378h5"
+    },
+    {
+      "code": "JLP",
+      "name": "Joint Linguistics-Psychology",
+      "department": "Department of Language Studies",
+      "division": "interdisciplinary",
+      "courseCount": 8,
+      "nameSource": "derived",
+      "sourceUrl": "https://utm.calendar.utoronto.ca/course/jlp285h5"
+    },
+    {
+      "code": "JPE",
+      "name": "Joint Political Science-Environment",
+      "department": "Department of Political Science",
+      "division": "social-sciences",
+      "courseCount": 2,
+      "nameSource": "derived",
+      "sourceUrl": "https://utm.calendar.utoronto.ca/course/jpe251h5"
+    },
+    {
+      "code": "LAT",
+      "name": "Latin",
+      "department": "Department of Historical Studies",
+      "division": "humanities",
+      "courseCount": 4,
+      "nameSource": "official",
+      "sourceUrl": "https://utm.calendar.utoronto.ca/section/Latin"
+    },
+    {
+      "code": "LIN",
+      "name": "Linguistics",
+      "department": "Department of Language Studies",
+      "division": "humanities",
+      "courseCount": 60,
+      "nameSource": "official",
+      "sourceUrl": "https://utm.calendar.utoronto.ca/section/Linguistics"
+    },
+    {
+      "code": "LTL",
+      "name": "Language Teaching and Learning",
+      "department": "Department of Language Studies",
+      "division": "humanities",
+      "courseCount": 14,
+      "nameSource": "official",
+      "sourceUrl": "https://utm.calendar.utoronto.ca/section/Language-Teaching-and-Learning"
+    },
+    {
+      "code": "MAT",
+      "name": "Mathematical Sciences",
+      "department": "Department of Mathematical and Computational Sciences",
+      "division": "sciences",
+      "courseCount": 59,
+      "nameSource": "official",
+      "sourceUrl": "https://utm.calendar.utoronto.ca/section/Mathematical-Sciences"
+    },
+    {
+      "code": "MGD",
+      "name": "Management (Digital Enterprise Management)",
+      "department": "Institute of Communication, Culture, Information and Technology",
+      "division": "professional",
+      "courseCount": 5,
+      "nameSource": "derived",
+      "sourceUrl": "https://utm.calendar.utoronto.ca/section/Management"
+    },
+    {
+      "code": "MGM",
+      "name": "Management (Management Programs)",
+      "department": "Department of Management",
+      "division": "professional",
+      "courseCount": 10,
+      "nameSource": "derived",
+      "sourceUrl": "https://utm.calendar.utoronto.ca/section/Management"
+    },
+    {
+      "code": "MGT",
+      "name": "Management",
+      "department": "Department of Management",
+      "division": "professional",
+      "courseCount": 85,
+      "nameSource": "official",
+      "sourceUrl": "https://utm.calendar.utoronto.ca/section/Management"
+    },
+    {
+      "code": "PHL",
+      "name": "Philosophy",
+      "department": "Department of Philosophy",
+      "division": "humanities",
+      "courseCount": 89,
+      "nameSource": "official",
+      "sourceUrl": "https://utm.calendar.utoronto.ca/section/Philosophy"
+    },
+    {
+      "code": "PHY",
+      "name": "Physics",
+      "department": "Department of Chemical and Physical Sciences",
+      "division": "sciences",
+      "courseCount": 23,
+      "nameSource": "official",
+      "sourceUrl": "https://utm.calendar.utoronto.ca/section/Physics"
+    },
+    {
+      "code": "POL",
+      "name": "Political Science",
+      "department": "Department of Political Science",
+      "division": "social-sciences",
+      "courseCount": 92,
+      "nameSource": "official",
+      "sourceUrl": "https://utm.calendar.utoronto.ca/section/Political-Science"
+    },
+    {
+      "code": "PRS",
+      "name": "Persian",
+      "department": "Department of Language Studies",
+      "division": "humanities",
+      "courseCount": 4,
+      "nameSource": "official",
+      "sourceUrl": "https://utm.calendar.utoronto.ca/section/Persian"
+    },
+    {
+      "code": "PSY",
+      "name": "Psychology",
+      "department": "Department of Psychological and Brain Sciences",
+      "division": "sciences",
+      "courseCount": 81,
+      "nameSource": "official",
+      "sourceUrl": "https://utm.calendar.utoronto.ca/section/Psychology"
+    },
+    {
+      "code": "PUN",
+      "name": "Punjabi",
+      "department": "Department of Language Studies",
+      "division": "humanities",
+      "courseCount": 1,
+      "nameSource": "official",
+      "sourceUrl": "https://utm.calendar.utoronto.ca/course/pun212y5"
+    },
+    {
+      "code": "RLG",
+      "name": "History of Religions",
+      "department": "Department of Historical Studies",
+      "division": "humanities",
+      "courseCount": 103,
+      "nameSource": "official",
+      "sourceUrl": "https://utm.calendar.utoronto.ca/section/History-of-Religions"
+    },
+    {
+      "code": "SAH",
+      "name": "South Asian Humanities",
+      "department": "Department of Historical Studies",
+      "division": "humanities",
+      "courseCount": 2,
+      "nameSource": "official",
+      "sourceUrl": "https://utm.calendar.utoronto.ca/section/South-Asian-Humanities"
+    },
+    {
+      "code": "SAN",
+      "name": "Sanskrit",
+      "department": "Department of Language Studies",
+      "division": "humanities",
+      "courseCount": 2,
+      "nameSource": "official",
+      "sourceUrl": "https://utm.calendar.utoronto.ca/course/san291y5"
+    },
+    {
+      "code": "SOC",
+      "name": "Sociology",
+      "department": "Department of Sociology",
+      "division": "social-sciences",
+      "courseCount": 172,
+      "nameSource": "official",
+      "sourceUrl": "https://utm.calendar.utoronto.ca/section/Sociology"
+    },
+    {
+      "code": "SPA",
+      "name": "Spanish",
+      "department": "Department of Language Studies",
+      "division": "humanities",
+      "courseCount": 15,
+      "nameSource": "official",
+      "sourceUrl": "https://utm.calendar.utoronto.ca/section/Spanish"
+    },
+    {
+      "code": "STA",
+      "name": "Applied Statistics",
+      "department": "Department of Mathematical and Computational Sciences",
+      "division": "sciences",
+      "courseCount": 31,
+      "nameSource": "official",
+      "sourceUrl": "https://utm.calendar.utoronto.ca/section/Statistics,-Applied"
+    },
+    {
+      "code": "URD",
+      "name": "Urdu",
+      "department": "Department of Language Studies",
+      "division": "humanities",
+      "courseCount": 2,
+      "nameSource": "official",
+      "sourceUrl": "https://utm.calendar.utoronto.ca/course/urd212y5"
+    },
+    {
+      "code": "UTM",
+      "name": "utmONE and LAUNCH",
+      "department": "Institute for the Study of University Pedagogy",
+      "division": "interdisciplinary",
+      "courseCount": 18,
+      "nameSource": "derived",
+      "sourceUrl": "https://utm.calendar.utoronto.ca/section/Study-of-University-Pedagogy"
+    },
+    {
+      "code": "VCC",
+      "name": "Visual Culture and Communication",
+      "department": "Department of Visual Studies",
+      "division": "humanities",
+      "courseCount": 32,
+      "nameSource": "official",
+      "sourceUrl": "https://utm.calendar.utoronto.ca/section/Visual-Culture-and-Communication"
+    },
+    {
+      "code": "VST",
+      "name": "Visual Studies",
+      "department": "Department of Visual Studies",
+      "division": "humanities",
+      "courseCount": 2,
+      "nameSource": "official",
+      "sourceUrl": "https://utm.calendar.utoronto.ca/course/vst410h5"
+    },
+    {
+      "code": "WGS",
+      "name": "Women, Gender and Sexuality Studies",
+      "department": "Department of Historical Studies",
+      "division": "humanities",
+      "courseCount": 51,
+      "nameSource": "official",
+      "sourceUrl": "https://utm.calendar.utoronto.ca/section/Women,-Gender-and-Sexuality-Studies"
+    },
+    {
+      "code": "WRI",
+      "name": "Professional Writing and Communication",
+      "department": "Institute of Communication, Culture, Information and Technology",
+      "division": "professional",
+      "courseCount": 36,
+      "nameSource": "official",
+      "sourceUrl": "https://utm.calendar.utoronto.ca/course/wri410h5"
+    }
+  ]
+}
