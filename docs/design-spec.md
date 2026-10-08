@@ -245,6 +245,7 @@ Theme resolution:
 
   --edge-faint: #404a56;
   --edge-hover: #7b8592;
+  --edge-program: #b07d3c;  /* integration pass: program links at the soft chain weight (4.8:1) */
 
   --lane-sciences-1: #3fb7c2;       --lane-sciences-2: #2a8e98;
   --lane-social-sciences-1: #f07285; --lane-social-sciences-2: #d45d6c;
@@ -996,7 +997,7 @@ export const DEFAULT_GEOMETRY_OPTIONS: GeometryOptions = {
   laneCollapsedHeight: 0,        // lane whose nodes are all `hidden` ("Hide unrelated", filters)
   bandPadLeft: 10,               // NEW (tuning step 2: was 14)
   bandPadRight: 8,               // NEW: replaces the last column's trailing gap (tuning step 2: was 10)
-  columnGap: 24,                 // label end → next column's left edge (8 label pad + 16; tuning step 1: was 28)
+  columnGap: 28,                 // label end → next column's left edge (8 label pad + 20; owner decision 19.12 withdraws tuning step 1)
   miniColumnGap: 6,              // NEW: after a mini-only column
   colWidth: { full: 212, compact: 104, mini: 22 },   // maxima of one track; measured widths shrink them
   rowHeight: { full: 40, compact: 22, mini: 8 },
@@ -1005,7 +1006,7 @@ export const DEFAULT_GEOMETRY_OPTIONS: GeometryOptions = {
   miniGapAbove: 6,               // NEW: gap between the last labelled row and the mini grid
   miniPerRowMax: 10,             // NEW
   cellMaxHeight: { full: 720, compact: 440 },        // CHANGED to per class: wrap threshold
-  trackGap: 8,                   // between wrapped tracks of one column (vs columnGap 24)
+  trackGap: 8,                   // between wrapped tracks of one column (overview only; vs columnGap 28)
   dotInset: 8,                   // dot centre from the column's left edge
   labelX: 20,                    // NEW: label start from the column's left edge
   fullLabelMax: 172,             // NEW: max measured title or code width in a full label (tuning step 3: was 184)
@@ -1027,7 +1028,7 @@ Geometry stays pure because the widths are passed in.
 If a fit test in 16.2 (the 10.2 table) fails, tune in this order until it passes, and nowhere
 else:
 
-1. `columnGap` 28 → 24
+1. ~~`columnGap` 28 → 24~~ (withdrawn by owner decision 19.12: `columnGap` stays 28)
 2. `bandPadLeft` / `bandPadRight` 14 / 10 → 10 / 8
 3. `fullLabelMax` 184 → 172
 
@@ -1035,13 +1036,15 @@ If a target still fails after step 3, that frame falls back to the next priority
 step 4) plus edge-of-view pills. Record the outcome in the test as a known limit. Never lower the
 0.92 floor or the type sizes to make a fit pass.
 
-Outcome (2026-10-08, real Segoe UI measured in Chromium, `tests/graph-geometry.test.ts`): all three
-steps are applied above. The CSC148H5 chain with chain titles "direct" narrows from 1515 to 1426
-world px, still about 2 % over the 1398 px that 1920 × 1080 with the panel open allows at 0.92, so
-that frame uses window 1 (1062 px, fits). At 1536 × 864 window 2 (1062 px) exceeds the 1046 px
-allowed, so the frame centres the focus and the pills count the rest. With columnGap 24 the track
-gap equals a third of the column gap: a label end is 24 px from the next track's dot and 32 px from
-the next column's.
+Outcome (2026-10-08, real Segoe UI measured in Chromium, `tests/graph-geometry.test.ts`): steps 2
+and 3 are applied above; step 1 is withdrawn (19.12), so `columnGap` is 28 for smoother curves and
+fewer vertical buses in narrow gutters. The CSC148H5 chain with chain titles "direct" is 1454 world
+px (1515 before tuning, 1426 with `columnGap` 24), about 4 % over the 1398 px that 1920 × 1080 with
+the panel open allows at 0.92, so that frame uses window 1 (1078 px, fits). At 1536 × 864 window 2
+(1078 px) exceeds the 1046 px allowed, so the frame centres the focus and the pills count the rest.
+MAT232H5's prerequisites (595 px) fit both frames. With `columnGap` 28 the track gap (8) is less than
+a third of the column gap: a label end is 24 px from the next track's dot and 36 px from the next
+column's.
 
 ### 8.2 Display classes per state
 
@@ -1102,16 +1105,27 @@ Hidden nodes take no space. Labelled nodes are therefore never pushed down by mi
 labelled row of every cell in a lane starts at `laneTop + lanePaddingY`. This keeps CSC108H5 and
 CSC148H5 on the same row (fixes B's ragged rows).
 
-**Wrapping (tracks):**
+**Wrapping (tracks), overview only:**
 
-- When the labelled stack height of a cell exceeds `cellMaxHeight[class]` (use `full` when any
-  labelled node in the cell is full), the cell wraps into `T = ceil(H / cellMaxHeight)` tracks.
+- Only the overview (no course or program selected) wraps. While dimming is active, labelled cells
+  never wrap (owner decision 19.10): all labelled nodes of a cell stack in one track, so a tall
+  chain cell makes a tall lane (8.5) and framing plus edge-of-view pills (10.2, 10.3) cover what is
+  off-screen. Every highlighted edge therefore enters its target dot straight from the left. Mini
+  grids are the same in both cases. Example: SOC100H5 with chain titles "direct" stacks 65 rows in
+  the SOC 300-level cell.
+- In the overview, when the labelled stack height of a cell exceeds `cellMaxHeight[class]` (use
+  `full` when any labelled node in the cell is full), the cell wraps into
+  `T = ceil(H / cellMaxHeight)` tracks.
 - The fill is column-major: fill track 1 top to bottom until its height reaches H / T, then
   track 2, and so on. Tracks are balanced, top-aligned and share one row grid.
 - Tracks are never staggered, and edge-free courses are never laid out as a horizontal row.
-- The track gap (8) is less than a third of the column gap (28), and the band-header scale bar
-  marks tracks as notches inside one segment (9.2). Readers can therefore tell "same column,
-  wrapped" from "next column (one dependency step later)".
+- The track gap (8) is less than a third of the column gap (28): a label end is 24 px from the next
+  track's dot and 36 px from the next column's. The band-header scale bar marks tracks as notches
+  inside one segment (9.2). Readers can therefore tell "same column, wrapped" from "next column
+  (one dependency step later)".
+- Links of inner tracks are overview stubs that stay inside their own track gap (owner decision
+  19.11, `classifyOverviewEdge` / `plainEdgeStubs` in `routes.ts`): no faint stroke crosses another
+  track of the same column; hovering a node previews its links in full.
 - Example: ENG's 90-course 300-level cell, compact at 22 px rows with a 440 cap, wraps into 5
   tracks.
 
@@ -1210,10 +1224,10 @@ Truncation (all but the focus):
     another); two sources whose edges all end at one target, or two targets whose edges all come from
     one source, may (a bus of related edges). Left-over anchors take the neighbour row's slot where
     it is free.
-  - **Dense cells:** where no slot is free, a faint overview edge stops at the column edge with a
-    stub terminal dot (8.10) instead (18 ends of 4,367 faint edges on the UTM data). Routed chains
-    of 170+ highlighted edges in the densest lanes keep a pinned number of meeting runs (known limit,
-    `tests/graph-routes.test.ts`).
+  - **Dense cells:** where no slot is free, a full path takes the near slot that only edges of its
+    own kind use (a bus). Since owner decision 19.11 full paths with a wrapped-track end appear only
+    in hover previews (the overview draws such edges as stubs, 8.10), and since 19.10 no chain or
+    program cell wraps.
 
 ### 8.8 Corridor routing
 
@@ -1244,6 +1258,19 @@ program and hover preview.
    colour.
 7. **Fallback:** candidate A drawn beneath the knockouts. It is counted in a debug counter
    (`routes.fallbacks`), which is asserted to be 0 for the regression cases in 16.2.
+8. **Port zones** (integration pass, visual QA: vertical runs along a column's exits or entries read
+   as brackets linking the courses of that column). A port zone is where a course's own routed edge
+   joins it: the end of its leader (2 px before the column out-port to the zone depth past it) and
+   its entry (from the zone depth before `x_in` to the dot), on its row ± 1. When the route found by
+   steps 3-5 passes the port zone of a course that is not one of its ends, the edge is routed again
+   with those zones as obstacles, 6 px deep and then 4 px deep (inflated by 2: 8 px, then 6 px clear),
+   at most 20 level pairs each; in a 20 px gutter the S-steps then leave the change of height 10 px
+   so it runs down the middle. Where neither pass finds a route, the first route stays. Branches of
+   one bundle may pass each other's zones (a bus of related edges). On the UTM data (every course
+   selected, chain titles "all") paths passing within 8 px of another course's leader end or entry
+   went from 1,284 same-column cases to 310 (70 within 5.5 px), and false links to other columns' courses from 2,176 to 897.
+9. **Hover previews and Show all connections** (8.10) use the same routing for faint edges (the plain
+   curve where it is clear), so no preview runs through a course it does not connect.
 
 Same-row links that skip columns always go through B or C. B's "bypass arch" is not used.
 
@@ -1265,7 +1292,10 @@ Same-row links that skip columns always go through B or C. B's "bypass arch" is 
   median y, with a maximum of ± 9 px. The fan therefore spreads before it bends.
 - Trunks use corridor routing like any edge.
 - The same rule applies to direct prerequisite fans of 6 or more (for example STA256H5's
-  prerequisites), mirrored.
+  prerequisites), mirrored, except that corequisites are never merged on the prerequisite side
+  (integration pass, visual QA): their dashed branches met in a dashed bracket along their column's
+  exits, which read as those courses being corequisites of each other (ECO200Y5's MAT133Y5 /
+  MAT135H5 / MAT137H5). Each corequisite is drawn as its own dashed edge.
 - No glow, ever.
 
 ### 8.10 Overview long-edge stubs and hover preview
@@ -1274,21 +1304,39 @@ Same-row links that skip columns always go through B or C. B's "bypass arch" is 
   long when its endpoints are 3 or more visible lanes apart in display order, or when the vertical
   distance between its endpoints exceeds 320 world px (tall lanes otherwise produce grey ropes).
 - **Wrapped tracks:** faint edges, stubs and hover previews use the same anchor maths as routed
-  edges (`plainEdgePaths` / `plainEdgeStubs` in `routes.ts`, 8.7): an edge leaving a track that is
-  not the last one steps into the row gap right after its label and runs to the column out-port; an
-  edge into a later track arrives along a row gap and drops into the dot from above or below. The
-  row-gap slots are planned over the whole faint picture (`planWith`), so the same edge keeps its
-  anchors in the faint layer, the stubs and the hover preview, and no source's run meets a target's
-  run (product rule: no edge inside one column).
+  edges (`plainEdgePaths` / `plainEdgeStubs` / `routedEdgePaths` in `routes.ts`, 8.7): in a full
+  path (hover preview) an edge leaving a track that is not the last one steps into the row gap right
+  after its label and runs to the column out-port; an edge into a later track arrives along a row
+  gap and drops into the dot from above or below. The row-gap slots are planned over the whole faint
+  picture (`planWith`), so the same edge keeps its anchors in the faint layer and the hover preview,
+  and no source's run meets a target's run (product rule: no edge inside one column).
 - **Stub drawing:**
   - At the source: a 14 px horizontal stub from the out-port, ending in a 1.5 px-radius terminal
     dot.
   - At the target: a 10 px horizontal stub into the entry, starting with the same terminal dot.
   - Both in `--edge-faint`.
+- **Edges through other courses** (integration pass, visual QA: a same-row edge skipping a column
+  ran straight through every course on its row, CSC209H5 → CSC379H5 reading as CSC318H5 →
+  CSC338H5): a faint edge whose plain curve comes within 2 px of a label or 4 px of a dot of a course
+  it does not connect (`plainEdgeBlocked`) is drawn as the two port stubs above; with Show all
+  connections it is drawn in full, routed around labels and dots like a chain edge
+  (`routedEdgePaths`). About half of the plain-curve edges of the UTM overview take the stub form.
+- **Inner-track stubs** (owner decision 19.11, refined by the integration pass: at DPR 1 and 1.25
+  the 1.5 px terminal dot is invisible, so a straight stub between a track's label and the next
+  track's dot read as a link between those two courses of one column):
+  - A target in a later track gets a hook: its terminal dot in the track gap 4 px before its track,
+    in the row gap next to its row (above, or below when most of its sources lie below), a run along
+    that gap and a quarter turn onto the top (or bottom) of its dot. Nothing lies on its row. A row
+    gap of one track carries at most one hook (two would read as a link between the courses above and
+    below it); a node whose two gaps are taken draws none.
+  - A source in an inner track gets a straight 14 px stub along its row only where no course of the
+    next track faces it on its row and no hook arrives in a row gap next to its row; elsewhere its
+    links show on hover only.
 - **Hover preview:** hovering a node draws all of that node's edges at full length in
-  `--edge-hover`, 1.25 px. Long edges are routed without corridors, for speed. The hover ring and
-  tooltip appear as well.
-- With Show all connections on, every faint edge is drawn at full length.
+  `--edge-hover`, 1.25 px, routed like chain edges (8.8, port zones included), so no preview runs
+  through a course it does not connect. The hover ring and tooltip appear as well.
+- With Show all connections on, every faint edge is drawn at full length (inner-track links stay
+  stubs, 19.11).
 
 ### 8.11 Z-order (canvas, bottom → top)
 
@@ -1717,7 +1765,12 @@ Rendering requirements:
   - CSC148H5 → CSC338H5 / CSC310H5 (past the CSC211H5, CSC290H5, CSC236H5 and CSC263H5 labels)
   - The MAT232H5 fan (past the MAT236H5 code line)
   - MAT232H5 → MAT402H5 (past MAT354H5)
-- Fan bundling activates for ECO200Y5, PSY100Y5, STA256H5 and SOC221H5.
+- Fan bundling activates for ECO200Y5, PSY100Y5, STA256H5 and SOC221H5; corequisites never merge
+  on the prerequisite side.
+- No routed path passes another course's port zone on the acceptance chains (CSC148H5 all, direct
+  and Hide unrelated, MAT232H5, ECO200Y5).
+- No full faint edge or hover preview passes a label or dot of a course it does not connect; no
+  faint stroke crosses another track of its column; one hook per row gap.
 - Chain titles auto resolves to "direct" for CSC148H5 at 1536 with the panel open. The Titles
   toggle forces "all".
 
@@ -1739,6 +1792,9 @@ dark):
   - Vision-deficiency emulations
 - Fit assertions per the 10.2 table.
 - Axe scans (12).
+- Hard product rule node by node on the production build (`hard-rule-layout.spec.ts`, through the
+  read-only `__courseMapLayout` getter): no second track while a course or program is selected, one
+  dot x per chain column, every edge strictly left to right.
 - `perf.spec` for 16.1.
 
 ---
@@ -1749,6 +1805,9 @@ dark):
 
 - Never animate during drag or wheel.
 - Any user input cancels a tween in flight and jumps it to its end state.
+- Pointer moves during a geometry tween are not hit-tested (the end layout is not on screen yet);
+  when the layout and the view settle, or a tween is jumped, the resting pointer is hit-tested
+  again, so the hover ring and pointer cursor follow what is under it.
 - With `prefers-reduced-motion: reduce`, tweens and animated pans become instant. Only opacity
   fades of 100 ms or less remain.
 
@@ -1757,7 +1816,7 @@ dark):
 | Geometry change (select, clear, filter, Titles) | 260 ms | `cubic-bezier(0.2, 0, 0, 1)` | Interpolate node centres, dot radii and column/lane boxes. Labels fade out 100 ms, then fade in 160 ms after a 100 ms delay. Chain edges are hidden during the tween. |
 | Chain edges appear | 160 ms fade | linear | Direct edges at 0 ms, transitive at +60 ms. Opacity only, no draw-on, since fans of 100+ edges would flicker. |
 | Focus glyph | 180 ms | `cubic-bezier(0.2, 0, 0, 1)` | Ring scales 0.6 → 1; plate fades over 120 ms. |
-| Framing pan or zoom | 320 ms | `cubic-bezier(0.4, 0, 0.2, 1)` | Hash, search, `F`, double-click |
+| Framing pan or zoom | 320 ms | `cubic-bezier(0.4, 0, 0.2, 1)` | Hash, search, `F`, double-click. A framing pan that comes with a geometry change runs on the geometry's clock and easing (260 ms, emphasis), so the focus slides straight to its frame instead of swinging out of the plot while lanes collapse (integration pass) |
 | Click-anchor nudge | 220 ms | same | |
 | Edge-of-view pill appear / click-pan | 160 ms fade / 320 ms pan | linear / standard | |
 | Hover ring / tooltip | 80 ms / 120 ms fade, 350 ms delay | linear | |
@@ -1837,6 +1896,9 @@ The owner delegated these choices; they are final for V1.
     track that is not the last one of its wrapped cell, or whose target sits in a track that is not
     the first one, is drawn only as a short stub with a terminal dot inside that track's own gap (it
     never crosses another track of the same column). Hovering a node previews its links in full.
+    The integration pass refined the stub forms after visual QA (8.10): target stubs arrive from
+    the row gap as hooks, and source stubs are drawn only where nothing in the next track faces
+    them.
 12. **Column gap 28:** `columnGap` returns to 28 for smoother curves and fewer vertical buses in
     narrow gutters; where a chain is wider than the plot, framing falls back to the priority windows
     and pills (10.2).
