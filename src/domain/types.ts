@@ -15,7 +15,10 @@ export interface Requirement {
   rawText: string
   sourceUrl: string
   rule: Rule
+  /** Courses the requirement actually depends on (required or alternatives); these become graph edges. */
   courseIds: string[]
+  /** Codes mentioned but ruled out, advisory or conditional ("except ENG100H5"); never edges. */
+  mentionedIds?: string[]
 }
 export interface Course {
   id: string
@@ -36,6 +39,10 @@ export interface Course {
   restrictions: Requirement
   notes: string
   distribution?: string
+  /** Delivery location when not the main campus (e.g. "Sheridan"). */
+  deliveryCampus?: string
+  courseExperience?: string
+  internationalComponent?: string
 }
 export interface ProgramGroup extends Requirement {
   id: string

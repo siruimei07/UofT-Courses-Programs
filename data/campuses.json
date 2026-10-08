@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "campuses": [
+    {
+      "id": "UTM",
+      "name": "University of Toronto Mississauga",
+      "shortName": "UTM",
+      "status": "available",
+      "dataDir": "utm",
+      "calendarUrl": "https://utm.calendar.utoronto.ca/",
+      "courseSearchUrl": "https://utm.calendar.utoronto.ca/course-search",
+      "programSearchUrl": "https://utm.calendar.utoronto.ca/program-search",
+      "coursePageTemplate": "https://utm.calendar.utoronto.ca/course/{slug}",
+      "programPageTemplate": "https://utm.calendar.utoronto.ca/program/{slug}",
+      "campusDigit": "5"
+    },
+    {
+      "id": "UTSG",
+      "name": "University of Toronto St. George",
+      "shortName": "St. George",
+      "status": "planned",
+      "dataDir": "utsg",
+      "calendarUrl": "https://artsci.calendar.utoronto.ca/",
+      "courseSearchUrl": "https://artsci.calendar.utoronto.ca/search-courses",
+      "programSearchUrl": "https://artsci.calendar.utoronto.ca/search-programs",
+      "coursePageTemplate": "https://artsci.calendar.utoronto.ca/course/{slug}",
+      "programPageTemplate": "https://artsci.calendar.utoronto.ca/program/{slug}",
+      "campusDigit": "1"
+    }
+  ]
+}
