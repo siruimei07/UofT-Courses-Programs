@@ -5,9 +5,10 @@ import type {
 } from './types'
 
 /**
- * Design-spec 8.1, after its fit tuning order (columnGap 28 → 24, bandPad 14 / 10 → 10 / 8,
- * fullLabelMax 184 → 172): the CSC148H5 chain at 1920 × 1080 with the panel open still misses the
- * 0.92 floor by about 2 %, so every step applies (known limit recorded in tests/graph-geometry.test.ts).
+ * Design-spec 8.1: bandPad 10 / 8 and fullLabelMax 172 from the fit tuning order; columnGap is back
+ * at 28 (owner decision 19.12: smoother curves, fewer vertical buses in narrow gutters). Chains wider
+ * than the plot at the 0.92 floor fall back to the priority windows and pills of 10.2 (known limits
+ * recorded in tests/graph-geometry.test.ts).
  */
 export const DEFAULT_GEOMETRY_OPTIONS: GeometryOptions = {
   laneHeaderWidth: 176,
@@ -19,7 +20,7 @@ export const DEFAULT_GEOMETRY_OPTIONS: GeometryOptions = {
   laneCollapsedHeight: 0,
   bandPadLeft: 10,
   bandPadRight: 8,
-  columnGap: 24,
+  columnGap: 28,
   miniColumnGap: 6,
   colWidth: { full: 212, compact: 104, mini: 22 },
   rowHeight: { full: 40, compact: 22, mini: 8 },
@@ -107,7 +108,9 @@ export function computeGeometry(
   const rowH = (v: number) => (v === focus ? focusRowHeight(topology, v, opt, focusLines) : opt.rowHeight[cls[v] as Visible])
 
   const modes = topology.lanes.map(lane => laneMode(lane.nodes, cls, presentation.dimming))
-  const plans = topology.lanes.map((lane, l) => (modes[l] === 'labelled' ? planCells(topology.cells[l], cls, rowH, opt) : []))
+  // Owner decision 19.10: while a course or program is selected, labelled cells never wrap.
+  const wrap = !presentation.dimming
+  const plans = topology.lanes.map((lane, l) => (modes[l] === 'labelled' ? planCells(topology.cells[l], cls, rowH, opt, wrap) : []))
   const labelW = measureLabels(topology, cls, focus, measure)
   const columns = layoutColumns(topology, cls, focus, labelW, plans, opt)
   const bands = layoutBands(topology, columns.boxes, columns.gaps, opt)
@@ -172,12 +175,18 @@ function laneMode(laneNodes: readonly number[], cls: readonly DisplayClass[], di
   return dimming && !labelled ? 'slim' : 'labelled'
 }
 
-/** Stack or wrap the labelled nodes of every non-empty cell of a labelled lane (8.4). */
+/**
+ * Stack or wrap the labelled nodes of every non-empty cell of a labelled lane (8.4). Only the
+ * overview wraps (`wrap`): while dimming is active (a course or program selected, owner decision
+ * 19.10) every labelled node of a cell stacks in one track, so a tall chain cell makes a tall lane
+ * and every highlighted edge enters its dot straight from the left. Mini grids are the same either way.
+ */
 function planCells(
   row: readonly number[][],
   cls: readonly DisplayClass[],
   rowH: (v: number) => number,
   opt: GeometryOptions,
+  wrap: boolean,
 ): CellPlan[] {
   const plans: CellPlan[] = []
   row.forEach((cell, col) => {
@@ -198,7 +207,7 @@ function planCells(
       if (cls[v] === 'full') anyFull = true
     }
     const limit = anyFull ? opt.cellMaxHeight.full : opt.cellMaxHeight.compact
-    if (height <= limit || labelled.length < 2) {
+    if (!wrap || height <= limit || labelled.length < 2) {
       plans.push({ col, labelled, minis, tracks: 1, rowsPerTrack: labelled.length, pitch: 0, stackH: height })
       return
     }

@@ -70,9 +70,37 @@ const RUN_BUCKET = 8
 const STEEP = 2
 const STEEP_COST = 12
 const SEARCH_MAX = 6
-/** Level pairs evaluated per path (cheapest first); the last-resort pass that may share runs compares only its first CROWDED_SEARCH_MAX feasible ones. */
-const PAIR_MAX = 48
+/**
+ * Level pairs evaluated per path (cheapest first) until one is feasible; the search stops earlier as
+ * soon as a feasible pair is found and no cheaper one can beat it, so the cap only costs time on
+ * hard paths. 200 covers the tall unwrapped chain cells of owner decision 19.10: SOC100H5 with chain
+ * titles "direct" puts 65 rows in the SOC 300-level cell, and its 200 → 400-level edges find a free
+ * row gap through it only after ~100 equally cheap but blocked channels (48 left 2 fallbacks and
+ * 532 shared runs). The last-resort pass that may share runs compares only its first
+ * CROWDED_SEARCH_MAX feasible ones.
+ */
+const PAIR_MAX = 200
+/** Level pairs evaluated per path while port zones are in use: past these the next, looser pass takes over. */
+const PORT_PAIR_MAX = 20
 const CROWDED_SEARCH_MAX = 2
+
+/**
+ * Port zones (8.8.1, revised by the integration pass after visual QA): where a routed path leaves a
+ * course (the end of its leader at the column's out-port) and where one enters a course (its entry
+ * before the dot), on its row ± PORT_HALF. Another path passing through such a zone reads as joining
+ * that course's own edge there: vertical runs along a column's exits or entries made "brackets" that
+ * seemed to link the courses of one column. A path whose usual route passes the zone of a course it
+ * does not end at is routed again around the zones of all such courses, PORT_CLEAR px deep (plus
+ * INFLATE: 8 px clear of a leader end or an entry, then 6 px, which still leaves a 20 px gutter between
+ * a column's exits and the next column's entries an 8 px channel down its middle), and keeps its usual
+ * route only where neither finds one. A leader is a zone only at its end (from PORT_BACK px before the
+ * out-port): crossing it further left reads as a crossing, not as a junction.
+ */
+const PORT_CLEAR = [6, 4]
+const PORT_HALF = 1
+const PORT_BACK = 2
+/** Room an S-step leaves for the change of height while port zones are in use (levelMiddle). */
+const TRANSITION_ROOM = 10
 
 /** Fan bundling (8.9). */
 const FAN_MIN = 6
@@ -346,6 +374,11 @@ const cellOf = (value: number) => Math.floor(value / GRID)
 const gridKey = (gx: number, gy: number) => gx * 1_000_003 + gy
 
 function pathHits(segments: readonly PathSegment[], grid: ObstacleGrid, skip: readonly number[]): boolean {
+  return pathHitsAny(segments, [grid], [skip])
+}
+
+/** Does the path come inside an obstacle of any of the grids (each with its own skip list)? One sampling pass. */
+function pathHitsAny(segments: readonly PathSegment[], grids: readonly ObstacleGrid[], skips: ReadonlyArray<readonly number[]>): boolean {
   let x0 = Infinity
   let y0 = Infinity
   let x1 = -Infinity
@@ -363,8 +396,25 @@ function pathHits(segments: readonly PathSegment[], grid: ObstacleGrid, skip: re
       extend(s.x2, s.y2)
     }
   }
-  if (!grid.touches(x0, y0, x1, y1, skip)) return false
-  return samplePath(segments, SAMPLE_STEP, (x, y) => grid.hit(x, y, skip))
+  let a = -1
+  let b = -1
+  let c = -1
+  for (let i = 0; i < grids.length; i++) {
+    if (!grids[i].touches(x0, y0, x1, y1, skips[i])) continue
+    if (a < 0) a = i
+    else if (b < 0) b = i
+    else c = i
+  }
+  if (a < 0) return false
+  const ga = grids[a]
+  const sa = skips[a]
+  if (b < 0) return samplePath(segments, SAMPLE_STEP, (x, y) => ga.hit(x, y, sa))
+  const gb = grids[b]
+  const sb = skips[b]
+  if (c < 0) return samplePath(segments, SAMPLE_STEP, (x, y) => ga.hit(x, y, sa) || gb.hit(x, y, sb))
+  const gc = grids[c]
+  const sc = skips[c]
+  return samplePath(segments, SAMPLE_STEP, (x, y) => ga.hit(x, y, sa) || gb.hit(x, y, sb) || gc.hit(x, y, sc))
 }
 
 /** Endpoints of a routed path for run sharing: paths with a common source or target may share runs. */
@@ -521,6 +571,18 @@ interface Context {
   spans: ColumnSpan[]
   /** Inflated fork-junction boxes (they sit in a gutter, outside every column span). */
   junctionBoxes: Array<[number, number, number, number]>
+  /** Port zones of the routed edges' ends, one grid per PORT_CLEAR depth, owned by their course. */
+  portTiers: ObstacleGrid[]
+  /** The port zones in use while routing one path (a grid of portTiers), else null. */
+  ports: ObstacleGrid | null
+  portTier: number
+  /**
+   * Owners whose port zones the path being routed may pass (its own ends, bundle members), or null
+   * while routing without port zones (second pass, or a context without them).
+   */
+  portSkip: number[] | null
+  /** Port-zone blocks next to a port, per port position and target height (see stepRun). */
+  portBands: Map<string, Array<[number, number, number]>>
 }
 
 interface ColumnSpan {
@@ -670,6 +732,32 @@ function buildContext(topology: Topology, presentation: Presentation | null, geo
   return {
     topology, geometry, opt, focus, role, grid, rings, anchors, runs: new RunRegistry(), freeLeft, freeRight, gutterEnd, visibleBefore,
     cellMaxTrack, rowHalf, anchorShift, laneGaps, sides: new Map(), bands: new Map(), spans, junctionBoxes: [],
+    portTiers: [], ports: null, portTier: -1, portSkip: null, portBands: new Map(),
+  }
+}
+
+/**
+ * Port zones of labelled sources and targets, one grid per PORT_CLEAR depth: the end of a source's
+ * leader (from PORT_BACK px before its column's out-port to the depth past it) and a target's entry
+ * (from the depth before x_in to its dot).
+ */
+function addPortZones(ctx: Context, sources: Iterable<number>, targets: Iterable<number>) {
+  const { geometry, opt } = ctx
+  ctx.portTiers = PORT_CLEAR.map(() => new ObstacleGrid())
+  for (const v of new Set(sources)) {
+    const box = geometry.nodes[v]
+    if (!isLabelled(box.cls)) continue
+    const column = geometry.columns[ctx.topology.nodes[v].col]
+    const colOut = column.x + column.w - 2
+    const start = box.x + box.w + LEADER_GAP
+    PORT_CLEAR.forEach((depth, i) => ctx.portTiers[i].add(Math.max(start, colOut - PORT_BACK), box.cy - PORT_HALF, Math.max(colOut, start) + depth, box.cy + PORT_HALF, v))
+  }
+  for (const v of new Set(targets)) {
+    const box = geometry.nodes[v]
+    if (!isLabelled(box.cls)) continue
+    const column = geometry.columns[ctx.topology.nodes[v].col]
+    const xIn = column.x + box.track * (column.trackW + opt.trackGap) - 2
+    PORT_CLEAR.forEach((depth, i) => ctx.portTiers[i].add(xIn - depth, box.cy - PORT_HALF, box.cx, box.cy + PORT_HALF, v))
   }
 }
 
@@ -812,20 +900,26 @@ function plainPath(head: Port, tail: Port, branch: boolean): PathSegment[] {
   return assemble(head, plainMiddle(head, tail, branch), tail)
 }
 
-/** Is a routed middle part clear of every label, dot and ring except its own endpoints'? */
+/**
+ * Is a routed middle part clear of every label, dot and ring except its own endpoints' (and, while
+ * port zones are in use, of every port zone it may not pass)?
+ */
 function middleClear(ctx: Context, segs: readonly PathSegment[], skip: readonly number[]): boolean {
-  return !pathHits(segs, ctx.grid, skip) && !pathHits(segs, ctx.rings, skip)
+  if (ctx.ports && ctx.portSkip) return !pathHitsAny(segs, [ctx.grid, ctx.rings, ctx.ports], [skip, skip, ctx.portSkip])
+  return !pathHitsAny(segs, [ctx.grid, ctx.rings], [skip, skip])
 }
 
-/** How far a horizontal run at y may go from x0 towards x1 (obstacles, rings and, unless ignored, unrelated runs). */
+/** How far a horizontal run at y may go from x0 towards x1 (obstacles, rings, port zones and, unless ignored, unrelated runs). */
 function reachRight(ctx: Context, y: number, x0: number, x1: number, skip: readonly number[], ends: Ends | null): number {
-  const stop = ctx.rings.stopRight(y, x0, ctx.grid.stopRight(y, x0, x1, skip), skip)
+  let stop = ctx.rings.stopRight(y, x0, ctx.grid.stopRight(y, x0, x1, skip), skip)
+  if (ctx.ports && ctx.portSkip) stop = ctx.ports.stopRight(y, x0, stop, ctx.portSkip)
   return ends ? ctx.runs.stopRight(y, x0, stop, ends) : stop
 }
 
 /** How far back from x1 towards x0 a horizontal run at y may start. */
 function reachLeft(ctx: Context, y: number, x0: number, x1: number, skip: readonly number[], ends: Ends | null): number {
-  const stop = ctx.rings.stopLeft(y, ctx.grid.stopLeft(y, x0, x1, skip), x1, skip)
+  let stop = ctx.rings.stopLeft(y, ctx.grid.stopLeft(y, x0, x1, skip), x1, skip)
+  if (ctx.ports && ctx.portSkip) stop = ctx.ports.stopLeft(y, stop, x1, ctx.portSkip)
   return ends ? ctx.runs.stopLeft(y, stop, x1, ends) : stop
 }
 
@@ -907,6 +1001,20 @@ function stepRun(ctx: Context, x: number, y: number, level: number, side: 1 | -1
     if (skip.includes(owner)) continue
     free = Math.min(free, side > 0 ? Math.max(0, b0 - x) : Math.max(0, x - b1))
   }
+  if (ctx.ports && ctx.portSkip) {
+    const tierKey = `${key}|${ctx.portTier}`
+    let zones = ctx.portBands.get(tierKey)
+    if (!zones) {
+      zones = []
+      const near = side > 0 ? x : x - widest
+      ctx.ports.blocks(near, Math.min(y, level), near + widest, Math.max(y, level), [], zones)
+      ctx.portBands.set(tierKey, zones)
+    }
+    for (const [b0, b1, owner] of zones) {
+      if (ctx.portSkip.includes(owner)) continue
+      free = Math.min(free, side > 0 ? Math.max(0, b0 - x) : Math.max(0, x - b1))
+    }
+  }
   if (free >= Math.max(STEP_RUN_MIN, Math.min(gutter, reach)) - 1e-9) return free
   const step = (run: number) => (side > 0 ? [M(x, y), sStep(x, y, x + run, level)] : [M(x - run, level), sStep(x - run, level, x, y)])
   return stepRuns(travel, gutter, room).find(run => middleClear(ctx, step(run), skip)) ?? null
@@ -940,6 +1048,7 @@ function transitionWindow(
     }
   }
   for (const [bx0, by0, bx1, by1] of ctx.junctionBoxes) if (bx1 >= lo && bx0 <= hi && by1 >= y0 && by0 <= y1) blocks.push([bx0, bx1, -1])
+  if (ctx.ports && ctx.portSkip) ctx.ports.blocks(lo, y0, hi, y1, ctx.portSkip, blocks)
   blocks.sort((p, q) => p[0] - q[0])
   let best: [number, number] | null = null
   let cursor = lo
@@ -1004,15 +1113,19 @@ function levelMiddle(
     gutter0 = span * share
     gutter1 = span - gutter0
   }
+  // While port zones are in use, the S-steps leave TRANSITION_ROOM px of a narrow gutter to the
+  // change of height, so it can run down the middle, clear of the exits and entries on both sides.
+  const reserve = ctx.ports && !single ? TRANSITION_ROOM : 0
   let r0 = 0
   if (step0) {
-    const run = memo(head, a.y, step1, () => stepRun(ctx, head.x, head.y, a.y, 1, gutter0, span - gutter1, skip))
+    const room = reserve ? Math.max(STEP_RUN_MIN, span - gutter1 - reserve) : span - gutter1
+    const run = memo(head, a.y, step1, () => stepRun(ctx, head.x, head.y, a.y, 1, gutter0, room, skip))
     if (run === null) return null
     r0 = run
   }
   let r1 = 0
   if (step1) {
-    const room = span - r0
+    const room = reserve ? Math.max(STEP_RUN_MIN, span - r0 - reserve) : span - r0
     const run = memo(tail, b.y, room, () => stepRun(ctx, tail.x, tail.y, b.y, -1, gutter1, room, skip))
     if (run === null) return null
     r1 = run
@@ -1067,6 +1180,8 @@ interface Job {
   branch: boolean
   /** Same-row link skipping columns: never the plain curve (8.8). */
   sameRow: boolean
+  /** Port-zone owners this path may pass (default: `skip`); a bundle's branches pass each other's. */
+  portSkip?: number[]
 }
 
 interface Routed {
@@ -1139,7 +1254,9 @@ function steepness(segments: readonly PathSegment[]): number {
  * The plain curve (A) when it is clear; otherwise the level pair with the lowest vertical detour
  * plus elbow penalty whose path clears every obstacle and lies on no run of an unrelated path.
  * When every candidate would share a run, the cheapest one that only clears obstacles is taken
- * before the plain-curve fallback. Anchor pieces (head and tail segments) are checked once per port.
+ * before the plain-curve fallback. A route that passes another course's port zone is replaced by
+ * the cheapest one that clears the zones, where there is one (PORT_CLEAR). Anchor pieces (head and
+ * tail segments) are checked once per port.
  */
 function route(ctx: Context, job: Job): Routed {
   const heads = job.heads.filter(head => !pathHits(head.segs, ctx.anchors, job.skip))
@@ -1147,24 +1264,17 @@ function route(ctx: Context, job: Job): Routed {
   // Ports whose fixed anchor already lies on a drawn unrelated run cannot give a clean path.
   const freeHeads = heads.filter(head => !ctx.runs.anchorClashes(head.segs, job.ends))
   const freeTails = tails.filter(tail => !ctx.runs.anchorClashes(tailAnchor(tail), job.ends))
-  if (!job.sameRow) {
-    for (const head of freeHeads) {
-      for (const tail of freeTails) {
-        const middle = plainMiddle(head, tail, job.branch)
-        if (middleClear(ctx, middle, job.skip) && !ctx.runs.middleClashes(middle, job.ends)) {
-          return { segments: assemble(head, middle, tail), fallback: false }
-        }
-      }
-    }
-  }
-  const memo = stepMemo()
-  const search = (pairs: readonly LevelPair[], ends: Ends | null, enough: number): PathSegment[] | null => {
+  let cleanPairs: LevelPair[] | null = null
+  const pairs = () => (cleanPairs ??= freeHeads.length && freeTails.length ? levelPairs(ctx, freeHeads, freeTails) : [])
+
+  const search = (list: readonly LevelPair[], ends: Ends | null, enough: number, memo: StepMemo): PathSegment[] | null => {
     let best: { segments: PathSegment[]; score: number } | null = null
     let tried = 0
     let evaluated = 0
-    for (const { head, tail, a, b, cost } of pairs) {
+    const max = ctx.ports ? PORT_PAIR_MAX : PAIR_MAX
+    for (const { head, tail, a, b, cost } of list) {
       if (best && (cost >= best.score || tried >= enough)) break
-      if (++evaluated > PAIR_MAX) break
+      if (++evaluated > max) break
       const middle = levelMiddle(ctx, head, tail, a, b, job.skip, ends, memo)
       if (!middle || (ends && ctx.runs.middleClashes(middle, ends))) continue
       tried++
@@ -1173,10 +1283,41 @@ function route(ctx: Context, job: Job): Routed {
     }
     return best?.segments ?? null
   }
-  const clean = freeHeads.length && freeTails.length ? search(levelPairs(ctx, freeHeads, freeTails), job.ends, SEARCH_MAX) : null
-  const segments = clean ?? search(levelPairs(ctx, heads, tails), null, CROWDED_SEARCH_MAX)
-  if (segments) return { segments, fallback: false }
-  return { segments: plainPath(job.heads[0], job.tails[0], job.branch), fallback: true }
+  /** One pass: the plain curve, then the cheapest level pair that shares no run with an unrelated path. */
+  const attempt = (): PathSegment[] | null => {
+    if (!job.sameRow) {
+      for (const head of freeHeads) {
+        for (const tail of freeTails) {
+          const middle = plainMiddle(head, tail, job.branch)
+          if (middleClear(ctx, middle, job.skip) && !ctx.runs.middleClashes(middle, job.ends)) return assemble(head, middle, tail)
+        }
+      }
+    }
+    return search(pairs(), job.ends, SEARCH_MAX, stepMemo())
+  }
+
+  // The usual route first; where it passes another course's port zone, the cheapest one that clears
+  // the zones (deepest first) replaces it, if there is one. Paths that would have to share a run
+  // with an unrelated path (last resort) are taken as they come.
+  const relaxed = attempt()
+  if (!relaxed) {
+    const crowded = search(levelPairs(ctx, heads, tails), null, CROWDED_SEARCH_MAX, stepMemo())
+    if (crowded) return { segments: crowded, fallback: false }
+    return { segments: plainPath(job.heads[0], job.tails[0], job.branch), fallback: true }
+  }
+  const portSkip = job.portSkip ?? job.skip
+  let clearTier = ctx.portTiers.length
+  while (clearTier > 0 && !pathHits(relaxed, ctx.portTiers[clearTier - 1], portSkip)) clearTier--
+  for (let tier = 0; tier < clearTier; tier++) {
+    ctx.ports = ctx.portTiers[tier]
+    ctx.portTier = tier
+    ctx.portSkip = portSkip
+    const segments = attempt()
+    ctx.ports = null
+    ctx.portSkip = null
+    if (segments) return { segments, fallback: false }
+  }
+  return { segments: relaxed, fallback: false }
 }
 
 // ---------------------------------------------------------------------------
@@ -1470,7 +1611,10 @@ export function computeRoutes(topology: Topology, presentation: Presentation, ge
   })
   const directInEdges = [...directIn.values()]
   const unlockBundles = planBundles(ctx, directOut, directOut, e => edges[e].to)
-  const prereqBundles = planBundles(ctx, directInEdges, directInEdges.filter(e => !junctionOf.has(e)), e => edges[e].from)
+  // Corequisites are never merged on the prerequisite side (integration pass, visual QA): their
+  // dashed branches met in a dashed bracket along their column's exits, which read as the courses
+  // of that column being corequisites of each other. Each is drawn as its own dashed edge.
+  const prereqBundles = planBundles(ctx, directInEdges, directInEdges.filter(e => !junctionOf.has(e) && edges[e].kind !== 'coreq'), e => edges[e].from)
   const mergedIn = new Set(prereqBundles.flatMap(bundle => bundle.edges))
   planAnchorSides(ctx, routed.flatMap(e => {
     const { from, to } = edges[e]
@@ -1480,6 +1624,8 @@ export function computeRoutes(topology: Topology, presentation: Presentation, ge
   }))
   const bundled = new Set<number>()
   for (const bundle of [...unlockBundles, ...prereqBundles]) for (const e of bundle.edges) bundled.add(e)
+  // Port zones of every routed end (and of the focus, which trunks and fork stubs leave or enter).
+  addPortZones(ctx, [...routed.map(e => edges[e].from), ...(focus >= 0 ? [focus] : [])], [...routed.map(e => edges[e].to), ...(focus >= 0 ? [focus] : [])])
   const isDirect = (role: EdgeRole) => role === 'prereq-direct' || role === 'unlock-direct'
 
   const tasks: Task[] = []
@@ -1514,8 +1660,8 @@ export function computeRoutes(topology: Topology, presentation: Presentation, ge
     const column = geometry.columns[bundle.col]
     const heads = headPorts(ctx, focus, bundle.y, staggerOf(i, unlockBundles.length))
     // 22 px before the column (8.9), but never left of the middle of the free gutter, so the trunk
-    // keeps room to turn into the split point when the gutter is narrow (columnGap 24, hidden
-    // columns); in the column right after the focus it must still lie past the out-port.
+    // keeps room to turn into the split point when the gutter is narrow (a 20 px gutter at columnGap
+    // 28, hidden columns); in the column right after the focus it must still lie past the out-port.
     const middle = (ctx.freeLeft[bundle.col] + ctx.gutterEnd[bundle.col]) / 2
     const x = Math.max(column.x - SPLIT_BEFORE, middle, heads[0].x + STEP_RUN_MIN)
     const lane = laneAt(geometry, bundle.y)
@@ -1525,9 +1671,14 @@ export function computeRoutes(topology: Topology, presentation: Presentation, ge
       job: { heads, tails: [tail], skip: [focus], ends: { from: focus, to: -1 }, branch: false, sameRow: false },
       direct: true,
     })
+    // The branches of one bundle may pass each other's entries (a bus of related edges, 8.8.6).
+    const members = bundle.edges.map(e => edges[e].to)
     for (const e of bundle.edges) {
       const to = edges[e].to
-      const job: Job = { heads: [freeHead(x, bundle.y, column.x - 1, lane)], tails: tailPorts(ctx, to, bundle.y), skip: [focus, to], ends: { from: focus, to }, branch: true, sameRow: false }
+      const job: Job = {
+        heads: [freeHead(x, bundle.y, column.x - 1, lane)], tails: tailPorts(ctx, to, bundle.y), skip: [focus, to], ends: { from: focus, to }, branch: true, sameRow: false,
+        portSkip: [focus, ...members],
+      }
       tasks.push({ meta: { edge: e, role: edgeRole[e], kind: edges[e].kind, shape: 'branch' }, job, direct: true })
     }
   })
@@ -1544,9 +1695,13 @@ export function computeRoutes(topology: Topology, presentation: Presentation, ge
       const colOut = column.x + column.w - 2
       const x = colOut + clamp(ctx.freeRight[bundle.col] - colOut - 4, 4, MERGE_AFTER)
       const lane = laneAt(geometry, bundle.y)
+      const members = bundle.edges.map(e => edges[e].from)
       for (const e of bundle.edges) {
         const from = edges[e].from
-        const job: Job = { heads: headPorts(ctx, from, bundle.y), tails: [freeTail(x, bundle.y, colOut, lane)], skip: [from, focus], ends: { from, to: focus }, branch: true, sameRow: false }
+        const job: Job = {
+          heads: headPorts(ctx, from, bundle.y), tails: [freeTail(x, bundle.y, colOut, lane)], skip: [from, focus], ends: { from, to: focus }, branch: true, sameRow: false,
+          portSkip: [focus, ...members],
+        }
         tasks.push({ meta: { edge: e, role: edgeRole[e], kind: edges[e].kind, shape: 'branch' }, job, direct: true })
       }
       // The trunk end is staggered around the focus row and S-steps into it before the entry, so
@@ -1562,7 +1717,10 @@ export function computeRoutes(topology: Topology, presentation: Presentation, ge
       }
       if (end > xIn) segs.push(L(end, focusBox.cy))
       const tail = freeTail(tailX, y, ctx.freeLeft[topology.nodes[focus].col], focusLane, focusGaps(bundle.y), segs)
-      const job: Job = { heads: [freeHead(x, bundle.y, ctx.freeRight[bundle.col], lane)], tails: [tail], skip: [focus], ends: { from: -1, to: focus }, branch: false, sameRow: false }
+      const job: Job = {
+        heads: [freeHead(x, bundle.y, ctx.freeRight[bundle.col], lane)], tails: [tail], skip: [focus], ends: { from: -1, to: focus }, branch: false, sameRow: false,
+        portSkip: [focus, ...members],
+      }
       tasks.push({ meta: { edge: -1, role: 'prereq-direct', kind: bundleKind(topology, bundle.edges), shape: 'trunk' }, job, direct: true })
     })
   }
@@ -1597,6 +1755,124 @@ export function computeRoutes(topology: Topology, presentation: Presentation, ge
   return { paths, fallbacks }
 }
 
+// ---------------------------------------------------------------------------
+// Overview picture: full faint edges, long-edge stubs and inner-track stubs (8.10, owner decision 19.11)
+
+/**
+ * How a faint overview edge is drawn (classifyOverviewEdge):
+ * - 'full': the whole plain anchored curve (`plainEdgePaths`);
+ * - 'long-stub': a long edge with Show all connections off, drawn as both halves of `plainEdgeStubs`;
+ * - 'inner-stub': an edge with an end inside a wrapped cell (a source in a track that is not the last
+ *   one of its cell, or a target in a track that is not the first), drawn as both halves of
+ *   `plainEdgeStubs` whatever Show all connections says. Its inner end gets a short stub inside its
+ *   own track gap, so no faint stroke ever crosses another track of that column (19.11).
+ * Hover previews draw any edge in full with `plainEdgePaths` (leader: true), whatever its form.
+ */
+export type OverviewEdgeForm = 'full' | 'long-stub' | 'inner-stub'
+
+export interface OverviewEdgeOptions {
+  /**
+   * Show all connections off (default true): long edges become 'long-stub'. Pass false with Show all
+   * connections on (every edge without an inner end is then 'full').
+   */
+  longStubs?: boolean
+}
+
+/** Long overview edge (8.10): at least this many visible lanes apart in display order ... */
+export const LONG_EDGE_LANES = 3
+/** ... or more than this many world px apart vertically (tall lanes would otherwise draw grey ropes). */
+export const LONG_EDGE_DY = 320
+
+/** Terminal dot radius of a stub (8.10); the inner-stub clearances are measured from its edge. */
+export const STUB_TERMINAL = 1.5
+/**
+ * Inner-track stubs (19.11): a source stub's terminal dot keeps at least INNER_CLEAR px from the next
+ * track's dot (taken at the largest radius, DOT_R_MAX); a target stub's terminal dot stays past the
+ * previous track's right edge and at least INNER_CLEAR px after the label on its row. A track gap
+ * carries at most one stub per row (the target stub wins), so no two stubs ever face each other
+ * between two courses of one column.
+ */
+export const INNER_CLEAR = 6
+/** An inner stub shorter than this (between its ends) is not drawn. */
+const INNER_STUB_MIN = 4
+/** An inner target stub's terminal dot sits this far before its track, inside the track gap (8). */
+const INNER_HOOK_LEAD = 4
+
+interface TrackInfo {
+  /** Per labelled node: the highest track used by the labelled nodes of its cell (0 elsewhere). */
+  lastTrack: Int32Array
+  /** Per lane: rank among the lanes that are not collapsed, in display order (-1 when collapsed). */
+  laneRank: Int32Array
+  /** Labelled node of a wrapped cell per (lane, column, track, row): the row neighbours in other tracks. */
+  rows: Map<string, number>
+}
+
+const rowKey = (lane: number, col: number, track: number, cy: number) => `${lane}|${col}|${track}|${cy}`
+
+/** Per-geometry track facts, computed once per geometry. */
+const trackInfos = new WeakMap<Geometry, { topology: Topology; info: TrackInfo }>()
+
+function trackInfo(topology: Topology, geometry: Geometry): TrackInfo {
+  const cached = trackInfos.get(geometry)
+  if (cached && cached.topology === topology) return cached.info
+  const nodes = geometry.nodes
+  const lastTrack = new Int32Array(topology.nodes.length)
+  const rows = new Map<string, number>()
+  topology.cells.forEach((row, lane) => row.forEach((cell, col) => {
+    let last = 0
+    for (const v of cell) if (isLabelled(nodes[v].cls)) last = Math.max(last, nodes[v].track)
+    for (const v of cell) {
+      if (!isLabelled(nodes[v].cls)) continue
+      lastTrack[v] = last
+      if (last > 0) rows.set(rowKey(lane, col, nodes[v].track, nodes[v].cy), v)
+    }
+  }))
+  const laneRank = new Int32Array(topology.lanes.length).fill(-1)
+  let rank = 0
+  geometry.lanes.forEach((box, l) => {
+    if (box && !box.collapsed && box.h > 0) laneRank[l] = rank++
+  })
+  const info: TrackInfo = { lastTrack, laneRank, rows }
+  trackInfos.set(geometry, { topology, info })
+  return info
+}
+
+/**
+ * Ends of an edge that sit inside a wrapped cell: a source in a track that is not the last one of
+ * its cell, a target in a track that is not the first. Only the overview wraps (19.10), so both are
+ * always false while a course or program is selected.
+ */
+export function innerTrackEnds(topology: Topology, geometry: Geometry, edge: number): { source: boolean; target: boolean } {
+  const { from, to } = topology.edges[edge]
+  const a = geometry.nodes[from]
+  const b = geometry.nodes[to]
+  return {
+    source: isLabelled(a.cls) && a.track < trackInfo(topology, geometry).lastTrack[from],
+    target: isLabelled(b.cls) && b.track > 0,
+  }
+}
+
+/** Long overview edge (8.10): LONG_EDGE_LANES or more visible lanes apart, or more than LONG_EDGE_DY px apart vertically. */
+export function isLongOverviewEdge(topology: Topology, geometry: Geometry, edge: number): boolean {
+  const { from, to } = topology.edges[edge]
+  const { laneRank } = trackInfo(topology, geometry)
+  const ra = laneRank[topology.nodes[from].lane]
+  const rb = laneRank[topology.nodes[to].lane]
+  return Math.abs(ra - rb) >= LONG_EDGE_LANES || Math.abs(geometry.nodes[to].cy - geometry.nodes[from].cy) > LONG_EDGE_DY
+}
+
+/**
+ * The form of a faint overview edge (see OverviewEdgeForm): 'inner-stub' when an end sits inside a
+ * wrapped cell, else 'long-stub' when long stubs are on and the edge is long, else 'full'.
+ * Draw 'full' edges with `plainEdgePaths` and both stub forms with `plainEdgeStubs`, all with the
+ * same `planWith` (the whole picture).
+ */
+export function classifyOverviewEdge(topology: Topology, geometry: Geometry, edge: number, options: OverviewEdgeOptions = {}): OverviewEdgeForm {
+  const ends = innerTrackEnds(topology, geometry, edge)
+  if (ends.source || ends.target) return 'inner-stub'
+  return (options.longStubs ?? true) && isLongOverviewEdge(topology, geometry, edge) ? 'long-stub' : 'full'
+}
+
 /** Options of the shared overview anchors. */
 export interface PlainEdgeOptions {
   /**
@@ -1607,18 +1883,20 @@ export interface PlainEdgeOptions {
   /** Start at labelEnd + 4 with a straight leader, like a highlighted edge (8.7). Faint edges and stubs start at the out-port. */
   leader?: boolean
   /**
-   * Edges drawn together with these (default: `edges` itself). Wrapped-track anchors take their row
-   * gap sides from all of them (see planAnchorSides), so a source's gap run and a later-track
-   * target's gap run never meet in one gap and read as a link inside one column; pass the same list
-   * to every call that draws one picture (faint edges and stubs) so an edge keeps its anchors.
+   * Edges drawn together with these (default: `edges` itself): pass the same list (the whole faint
+   * picture: full edges and both stub forms) to every call that draws one picture. `plainEdgeStubs`
+   * reads the inner target stubs of the picture from it (an inner source stub gives way to the target
+   * stub facing it on its row), and wrapped-track anchors of full paths (hover previews) take their
+   * row-gap sides from it (planAnchorSides). A hover preview may pass the picture plus its own edges,
+   * or just its own edges: the overview picture itself never draws a row-gap run (19.11).
    */
   planWith?: readonly number[]
   /**
-   * Faint overview texture only: where a dense wrapped cell has no free row-gap slot for an anchor,
-   * the edge stops at the column's entry (or starts at its out-port) instead of sharing a gap with
-   * an edge of the opposite direction, which would read as a link between two courses of the
-   * column. `onTruncate` receives each cut end (a terminal dot goes there, as on stubs, 8.10); a
-   * stub half that would start or end at such an anchor is left empty.
+   * Where a dense wrapped cell has no free row-gap slot for an anchor of a full path, the edge stops
+   * at the column's entry (or starts at its out-port) instead of sharing a gap with an edge of the
+   * opposite direction; `onTruncate` receives each cut end (a terminal dot goes there). Kept for
+   * compatibility: since 19.11 the overview draws every edge with an end inside a wrapped cell as
+   * stubs, so a 'full' edge (classifyOverviewEdge) is never cut. Stubs ignore it.
    */
   truncateUnplaced?: boolean
   onTruncate?: (edge: number, x: number, y: number) => void
@@ -1659,13 +1937,12 @@ function plainContext(topology: Topology, geometry: Geometry, edges: readonly nu
 }
 
 /**
- * Plain anchored curves (8.7, no corridor routing) for any edges: faint overview edges, hover
- * previews and the base of long-edge stubs (8.10) all use these anchors. A source in a wrapped
- * track that is not the last of its cell steps into the row gap right after its label and runs to
- * the column's out-port; a target in a later track arrives through the row gap and drops into its
- * dot from above or below. So no plain edge passes a label or dot of its own columns or seems to
- * link two of its courses (product rule: no edge inside one column). `edges` are indices into
- * `topology.edges`.
+ * Plain anchored curves (8.7, no corridor routing) for any edges: the 'full' faint overview edges
+ * and hover previews (which draw every edge of the hovered node in full, inner-track ends included).
+ * A source in a wrapped track that is not the last of its cell steps into the row gap right after
+ * its label and runs to the column's out-port; a target in a later track arrives through the row gap
+ * and drops into its dot from above or below. So no plain edge passes a label or dot of its own
+ * columns. `edges` are indices into `topology.edges`.
  *
  * The older argument order `(topology, presentation, geometry, edges, geometryOptions?)` is still
  * accepted: it starts every path at labelEnd + 4 (with the leader) and ignores the options, which
@@ -1702,23 +1979,217 @@ export function plainEdgePaths(
   })
 }
 
-/** Both halves of an overview long-edge stub (8.10), on the same anchors as `plainEdgePaths`. */
+/**
+ * Obstacle contexts (label, dot and ring boxes) with the wrapped-track anchors planned over the
+ * picture, keyed like plainPlans: made once per scene for the faint picture and its hover previews.
+ */
+const routedPlans = new WeakMap<readonly number[], { topology: Topology; geometry: Geometry; presentation: Presentation | null; ctx: Context }>()
+
+function routedContext(topology: Topology, geometry: Geometry, edges: readonly number[], options: PlainEdgeOptions): Context {
+  const presentation = options.presentation ?? null
+  const key = options.planWith
+  const cached = key ? routedPlans.get(key) : undefined
+  let base = cached && cached.topology === topology && cached.geometry === geometry && cached.presentation === presentation ? cached.ctx : null
+  if (!base) {
+    base = buildContext(topology, presentation, geometry, true)
+    base.sides = plainContext(topology, geometry, edges, options).sides
+    if (key) routedPlans.set(key, { topology, geometry, presentation, ctx: base })
+  }
+  // A fresh session: the runs drawn so far and the port zones belong to one call.
+  return { ...base, runs: new RunRegistry(), portTiers: [], ports: null, portTier: -1, portSkip: null, portBands: new Map() }
+}
+
+/**
+ * Overview picture (visual QA, integration pass): which plain anchored curves (`plainEdgePaths` with
+ * the same options) come within 2 px of the label or within 4 px of the dot of a course that is not
+ * one of their ends. Such a curve reads as a link to that course (a same-row edge that skips a column
+ * runs straight through every dot on its row; through two courses of one column, or from the end of
+ * one label to the dot of the next track, it reads as a link inside that column), so
+ * the faint picture draws it as stubs, or routed with `routedEdgePaths` when every edge is shown.
+ */
+export function plainEdgeBlocked(topology: Topology, geometry: Geometry, edges: readonly number[], options: PlainEdgeOptions = {}): boolean[] {
+  if (!edges.length) return []
+  const dots = dotGrid(topology, geometry, options.presentation ?? null)
+  const paths = plainEdgePaths(topology, geometry, edges, options)
+  return edges.map((e, k) => {
+    const { from, to } = topology.edges[e]
+    return pathHitsAny(paths[k], [dots], [[from, to]])
+  })
+}
+
+/** Label boxes and dot boxes (r + 2), inflated by INFLATE, of every visible labelled node, per geometry and presentation. */
+const dotGrids = new WeakMap<Geometry, { topology: Topology; presentation: Presentation | null; grid: ObstacleGrid }>()
+
+function dotGrid(topology: Topology, geometry: Geometry, presentation: Presentation | null): ObstacleGrid {
+  const cached = dotGrids.get(geometry)
+  if (cached && cached.topology === topology && cached.presentation === presentation) return cached.grid
+  const grid = new ObstacleGrid()
+  geometry.nodes.forEach((box, v) => {
+    if (!isLabelled(box.cls)) return
+    const r = dotRadius(presentation?.role[v] ?? 'none', box.cls) + 2
+    grid.add(box.x, box.y, box.x + box.w, box.y + box.h, v)
+    grid.add(box.cx - r, box.cy - r, box.cx + r, box.cy + r, v)
+  })
+  dotGrids.set(geometry, { topology, presentation, grid })
+  return grid
+}
+
+/**
+ * Edges routed around labels, dots and rings like highlighted edges (8.8: the plain curve where it
+ * is clear, else row-gap and lane-padding corridors), on the anchors of `plainEdgePaths` with the
+ * same options (wrapped tracks included): hover previews and, with Show all connections, the faint
+ * edges whose plain curve is blocked (`plainEdgeBlocked`). Paths keep clear of each other's runs and,
+ * where they can, of the port zones of the other courses they connect.
+ */
+export function routedEdgePaths(topology: Topology, geometry: Geometry, edges: readonly number[], options: PlainEdgeOptions = {}): PathSegment[][] {
+  if (!edges.length) return []
+  const ctx = routedContext(topology, geometry, edges, options)
+  const leader = options.leader ?? false
+  if (leader) addPortZones(ctx, edges.map(e => topology.edges[e].from), edges.map(e => topology.edges[e].to))
+  return edges.map(e => {
+    const { from, to } = topology.edges[e]
+    const a = geometry.nodes[from]
+    const b = geometry.nodes[to]
+    const colFrom = topology.nodes[from].col
+    const colTo = topology.nodes[to].col
+    const sameRow = Math.abs(a.cy - b.cy) < 0.5 && ctx.visibleBefore[colTo] - ctx.visibleBefore[colFrom + 1] > 0
+    const job: Job = {
+      heads: headPorts(ctx, from, b.cy, 0, leader).slice(0, 1), tails: tailPorts(ctx, to, a.cy).slice(0, 1),
+      skip: [from, to], ends: { from, to }, branch: false, sameRow,
+    }
+    const result = route(ctx, job)
+    if (!result.fallback) ctx.runs.add(result.segments, job.ends)
+    return result.segments
+  })
+}
+
+/** Both halves of an overview stub (8.10, 19.11); a half is empty where nothing is drawn at that end. */
 export interface EdgeStubs {
-  /** From the source to its column's out-port (through the row gap for an inner wrapped track), then 14 px on; the terminal dot sits at the last point. */
+  /**
+   * At the source; the terminal dot sits at the last point.
+   * - Source in the last (or only) track of its cell: from the track's out-port (labelEnd + 2) along
+   *   its row to the column's out-port, then 14 px on.
+   * - Source in an inner track (19.11): straight along its row from labelEnd + 2, at most 14 px, its
+   *   terminal dot at least INNER_CLEAR px before the next track's dot, so it stays in its own track
+   *   gap. Empty where the next track's node on that row has a target stub (it is the target of an
+   *   edge of `planWith`): a track gap carries at most one stub per row, because two stubs facing
+   *   each other between two courses of one column would read as a broken link between them.
+   */
   source: PathSegment[]
-  /** From the terminal dot 10 px before the target's entry into its dot (through the row gap and down or up into it for a later wrapped track). */
+  /**
+   * At the target; the terminal dot sits at the first point.
+   * - Target in the first (or only) track: from 10 px before the entry (track left − 2) straight into
+   *   its dot (cx − r − 1).
+   * - Target in a later track (19.11): straight along its row into its dot, at most 10 px, its
+   *   terminal dot past the previous track's right edge and at least INNER_CLEAR px after the label on
+   *   its row, so it stays in its own track gap.
+   * All halves of one node's inner stub are identical, whichever of its edges they belong to.
+   */
   target: PathSegment[]
 }
 
+/**
+ * Nodes in a later track that are the target of an edge of the picture, with the side their inner
+ * target stub arrives from: +1 (the row gap below) when more of its sources lie below it, else -1
+ * (the row gap above). One row gap of a track carries at most one such stub: two stubs arriving from
+ * one gap, one into the course above it and one into the course below, would read as a link between
+ * those two courses of one column. A node whose gaps are both taken draws no stub (hover shows its
+ * links).
+ */
+function innerTargets(ctx: Context, picture: readonly number[]): Map<number, 1 | -1> {
+  const { topology, geometry } = ctx
+  const pull = new Map<number, number>()
+  for (const e of picture) {
+    const { from, to } = topology.edges[e]
+    if (!isLabelled(geometry.nodes[to].cls) || geometry.nodes[to].track === 0) continue
+    pull.set(to, (pull.get(to) ?? 0) + Math.sign(geometry.nodes[from].cy - geometry.nodes[to].cy))
+  }
+  const out = new Map<number, 1 | -1>()
+  const taken = new Set<string>()
+  const order = [...pull.keys()].sort((a, b) => geometry.nodes[a].cx - geometry.nodes[b].cx || geometry.nodes[a].cy - geometry.nodes[b].cy)
+  for (const v of order) {
+    const box = geometry.nodes[v]
+    const { lane, col } = topology.nodes[v]
+    const preferred: 1 | -1 = (pull.get(v) ?? 0) > 0 ? 1 : -1
+    for (const side of [preferred, -preferred as 1 | -1]) {
+      const key = `${lane}|${col}|${box.track}|${Math.round(box.cy + side * ctx.rowHalf[v])}`
+      if (taken.has(key)) continue
+      taken.add(key)
+      out.set(v, side)
+      break
+    }
+  }
+  return out
+}
+
+/**
+ * Inner target stub of a node in a later track (see EdgeStubs.target): from its terminal dot in the
+ * track gap, INNER_HOOK_LEAD px before the track, along the row gap on its side (the slot next to its
+ * own row) and a quarter turn down (or up) into the dot. Nothing lies on its row between the previous
+ * track's label and its dot, so the stub never reads as a link from the course before it.
+ */
+function innerTargetStub(ctx: Context, v: number, side: 1 | -1): PathSegment[] {
+  const { geometry, opt } = ctx
+  const box = geometry.nodes[v]
+  const column = geometry.columns[ctx.topology.nodes[v].col]
+  const trackLeft = column.x + box.track * (column.trackW + opt.trackGap)
+  const gap = box.cy + side * (ctx.rowHalf[v] - ctx.anchorShift[v])
+  const r = dotRadius(ctx.role(v), box.cls)
+  return [M(trackLeft - INNER_HOOK_LEAD, gap), ...hookInto(box.cx, gap, box.cy + side * (r + 1))]
+}
+
+/**
+ * Inner source stub of a node in a track that is not the last of its cell (see EdgeStubs.source):
+ * straight along its row from labelEnd + 2, drawn only where nothing in the next track faces it: no
+ * course on its row (a stub between two courses of one column reads as a link between them, visual
+ * QA) and no target stub in the row gaps next to its row (the two terminal dots would meet).
+ */
+function innerSourceStub(ctx: Context, info: TrackInfo, v: number, leader: boolean, targets: ReadonlyMap<number, 1 | -1>): PathSegment[] {
+  const { geometry, opt } = ctx
+  const box = geometry.nodes[v]
+  const node = ctx.topology.nodes[v]
+  if (info.rows.has(rowKey(node.lane, node.col, box.track + 1, box.cy))) return []
+  const pitch = 2 * ctx.rowHalf[v]
+  for (const side of [-1, 1] as const) {
+    const neighbour = info.rows.get(rowKey(node.lane, node.col, box.track + 1, box.cy + side * pitch))
+    if (neighbour !== undefined && targets.get(neighbour) === -side) return []
+  }
+  const column = geometry.columns[node.col]
+  const start = box.x + box.w + (leader ? LEADER_GAP : 2)
+  const nextLeft = column.x + (box.track + 1) * (column.trackW + opt.trackGap)
+  const end = Math.min(start + STUB_SOURCE, nextLeft + opt.dotInset - DOT_R_MAX - INNER_CLEAR - STUB_TERMINAL)
+  return end - start >= INNER_STUB_MIN - 1e-9 ? [M(start, box.cy), L(end, box.cy)] : []
+}
+
+/**
+ * Stub halves (EdgeStubs) of 'long-stub' and 'inner-stub' overview edges (classifyOverviewEdge),
+ * each end in its own form: the usual long-edge stub at an end outside a wrapped cell's inner
+ * tracks, the inner-track stub of 19.11 at an end inside one. The full path of any of these edges is
+ * still available from `plainEdgePaths` (hover previews).
+ */
 export function plainEdgeStubs(topology: Topology, geometry: Geometry, edges: readonly number[], options: PlainEdgeOptions = {}): EdgeStubs[] {
   const ctx = plainContext(topology, geometry, edges, options)
+  const info = trackInfo(topology, geometry)
+  const targets = innerTargets(ctx, options.planWith ?? edges)
+  const leader = options.leader ?? false
   return edges.map(e => {
     const { from, to } = topology.edges[e]
-    const head = headPorts(ctx, from, geometry.nodes[to].cy, 0, options.leader ?? false)[0]
-    const tail = tailPorts(ctx, to, geometry.nodes[from].cy)[0]
-    return {
-      source: options.truncateUnplaced && unplaced(ctx, from, true) ? [] : [...head.segs, L(head.x + STUB_SOURCE, head.y)],
-      target: options.truncateUnplaced && unplaced(ctx, to, false) ? [] : [M(tail.x - STUB_TARGET, tail.y), L(tail.x, tail.y), ...tail.segs],
+    const inner = innerTrackEnds(topology, geometry, e)
+    let source: PathSegment[]
+    if (inner.source) {
+      source = innerSourceStub(ctx, info, from, leader, targets)
+    } else {
+      const head = headPorts(ctx, from, geometry.nodes[to].cy, 0, leader)[0]
+      source = [...head.segs, L(head.x + STUB_SOURCE, head.y)]
     }
+    let target: PathSegment[]
+    if (inner.target) {
+      const side = targets.get(to)
+      target = side ? innerTargetStub(ctx, to, side) : []
+    } else {
+      const tail = tailPorts(ctx, to, geometry.nodes[from].cy)[0]
+      target = [M(tail.x - STUB_TARGET, tail.y), L(tail.x, tail.y), ...tail.segs]
+    }
+    return { source, target }
   })
 }

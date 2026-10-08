@@ -311,3 +311,101 @@ export function laterTrackReaches(topology: Topology, geometry: Geometry, paths:
   }
   return problems
 }
+
+/** Row band of every labelled node of a wrapped column, per column and track, sorted by top (cy ± half its cell's row pitch). */
+function trackRowBands(topology: Topology, geometry: Geometry): Map<string, Array<[number, number, number]>> {
+  const opt = geometryOptions(geometry)
+  const bands = new Map<string, Array<[number, number, number]>>()
+  topology.cells.forEach(row => row.forEach(cell => {
+    const labelled = cell.filter(v => geometry.nodes[v].cls === 'full' || geometry.nodes[v].cls === 'compact')
+    if (!labelled.length || geometry.columns[topology.nodes[labelled[0]].col].tracks < 2) return
+    const pitch = Math.max(...labelled.map(v => Math.max(geometry.nodes[v].h, opt.rowHeight[geometry.nodes[v].cls as 'full' | 'compact'])))
+    for (const v of labelled) {
+      const key = `${topology.nodes[v].col}|${geometry.nodes[v].track}`
+      const list = bands.get(key) ?? []
+      list.push([geometry.nodes[v].cy - pitch / 2, geometry.nodes[v].cy + pitch / 2, v])
+      bands.set(key, list)
+    }
+  }))
+  for (const list of bands.values()) list.sort((a, b) => a[0] - b[0])
+  return bands
+}
+
+/**
+ * Product rule, wrapped tracks (owner decision 19.11): samples of strokes anchored in a wrapped column
+ * (the column of either end) that lie inside the x-range of another track of that column at the row
+ * of a node in that track (its row band, cy ± half the cell's row pitch). `items` are drawn strokes
+ * (full paths or stub halves) with their layout edge.
+ */
+export function otherTrackCrossings(
+  topology: Topology, geometry: Geometry, items: ReadonlyArray<{ edge: number; segments: readonly PathSegment[] }>, limit = 20,
+): string[] {
+  const opt = geometryOptions(geometry)
+  const bands = trackRowBands(topology, geometry)
+  const problems: string[] = []
+  for (const item of items) {
+    if (!item.segments.length) continue
+    const { from, to } = topology.edges[item.edge]
+    const ends = [from, to].filter(v => (geometry.nodes[v].cls === 'full' || geometry.nodes[v].cls === 'compact') && geometry.columns[topology.nodes[v].col].tracks > 1)
+    if (!ends.length) continue
+    samplePath(item.segments, 1, (x, y) => {
+      for (const v of ends) {
+        const col = topology.nodes[v].col
+        const column = geometry.columns[col]
+        if (x < column.x || x > column.x + column.w) continue
+        const pitch = column.trackW + opt.trackGap
+        const k = Math.floor((x - column.x) / pitch)
+        if (k === geometry.nodes[v].track || x - column.x - k * pitch > column.trackW) continue
+        const band = (bands.get(`${col}|${k}`) ?? []).find(([y0, y1]) => y > y0 && y < y1)
+        if (!band) continue
+        if (problems.length < limit) {
+          problems.push(`${topology.nodes[from].code}>${topology.nodes[to].code} crosses track ${k} at ${topology.nodes[band[2]].code}'s row (${x.toFixed(1)},${y.toFixed(1)})`)
+        }
+        return true
+      }
+      return false
+    })
+  }
+  return problems
+}
+
+/** Horizontal extent of a straight stub half at one height, terminal dot included at both ends. */
+function stubExtent(segments: readonly PathSegment[], terminal: number): { y: number; x0: number; x1: number } | null {
+  if (!segments.length) return null
+  const ys = segments.map(s => s.y)
+  if (ys.some(y => Math.abs(y - ys[0]) > 1e-9)) return null
+  const xs = segments.map(s => s.x)
+  return { y: ys[0], x0: Math.min(...xs) - terminal, x1: Math.max(...xs) + terminal }
+}
+
+/**
+ * Stub halves of different nodes on one row of one column (wrapped cells) that come closer than
+ * `clear` px (terminal dots included): two stubs facing each other in one track gap would read as a
+ * link between two courses of the column.
+ */
+export function facingStubs(
+  topology: Topology, halves: ReadonlyArray<{ v: number; segments: readonly PathSegment[] }>, clear = 6, terminal = 1.5,
+): string[] {
+  const rows = new Map<string, Array<{ v: number; x0: number; x1: number }>>()
+  for (const half of halves) {
+    const extent = stubExtent(half.segments, terminal)
+    if (!extent) continue
+    const key = `${topology.nodes[half.v].col}|${extent.y}`
+    const list = rows.get(key) ?? []
+    if (!list.some(other => other.v === half.v && other.x0 === extent.x0 && other.x1 === extent.x1)) list.push({ v: half.v, x0: extent.x0, x1: extent.x1 })
+    rows.set(key, list)
+  }
+  const problems: string[] = []
+  for (const list of rows.values()) {
+    for (let i = 0; i < list.length; i++) {
+      for (let k = i + 1; k < list.length; k++) {
+        const a = list[i]
+        const b = list[k]
+        if (a.v === b.v) continue
+        const gap = Math.max(a.x0, b.x0) - Math.min(a.x1, b.x1)
+        if (gap < clear - 1e-9) problems.push(`stubs of ${topology.nodes[a.v].code} and ${topology.nodes[b.v].code} are ${gap.toFixed(1)} px apart on one row`)
+      }
+    }
+  }
+  return problems
+}

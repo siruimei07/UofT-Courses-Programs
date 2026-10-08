@@ -23,6 +23,8 @@ function geometryProblems(topo: Topology, p: Presentation, g: Geometry, measureF
   const rowH = (v: number) => (v === focus ? g.nodes[v].h : options.rowHeight[p.cls[v] as 'full' | 'compact'])
   check(g.nodes.length === topo.nodes.length, () => 'node count')
   check(g.columns.length === topo.columnCount && g.lanes.length === topo.lanes.length && g.bands.length === topo.bands.length, () => 'box counts')
+  // Only the overview wraps (owner decision 19.10): while dimming, every column has one track.
+  if (p.dimming) check(g.columns.every(column => column.tracks === 1), () => `wrapped while dimming: columns ${g.columns.flatMap((column, col) => (column.tracks > 1 ? [col] : [])).join(', ')}`)
 
   // Columns (8.3).
   g.columns.forEach((column, col) => {
@@ -162,7 +164,8 @@ const states: Array<[string, PresentationInput]> = [
   ['CSC148H5, chain titles all', presentationInput({ focusId: 'UTM:CSC148H5' })],
   ['CSC148H5, chain titles direct', presentationInput({ focusId: 'UTM:CSC148H5', chainTitles: 'direct' })],
   ['CSC148H5, direct, hide unrelated', presentationInput({ focusId: 'UTM:CSC148H5', depth: 'direct', hideUnrelated: true })],
-  ['SOC221H5 (wrapped chain cells)', presentationInput({ focusId: 'UTM:SOC221H5', chainTitles: 'direct' })],
+  ['SOC221H5 (tall chain cells, unwrapped)', presentationInput({ focusId: 'UTM:SOC221H5', chainTitles: 'direct' })],
+  ['SOC100H5, chain titles direct (tallest chain cells)', presentationInput({ focusId: 'UTM:SOC100H5', chainTitles: 'direct' })],
   ['MAT232H5, levels 100 + 300', presentationInput({ focusId: 'UTM:MAT232H5', levels: new Set([100, 300]) })],
   ['levels 100 + 200', presentationInput({ levels: new Set([100, 200]) })],
   ['program (200-level CSC), show all edges', presentationInput({ programIds: cscProgram, showAllEdges: true })],
@@ -184,12 +187,12 @@ describe('geometry on the real UTM dataset', () => {
     }
   })
 
-  it('wraps tall cells into balanced, top-aligned, column-major tracks on one row grid', () => {
-    // 8 px against the tuned 24 px column gap (8.1 tuning step 1): a label end is 24 px from the next
-    // track's dot and 32 px from the next column's.
+  it('wraps tall cells of the overview into balanced, top-aligned, column-major tracks on one row grid', () => {
+    // 8 px against the 28 px column gap (owner decision 19.12): a label end is 24 px from the next
+    // track's dot and 36 px from the next column's.
     expect(opt.trackGap).toBeLessThanOrEqual(opt.columnGap / 3)
     let wrappedCells = 0
-    for (const input of [presentationInput(), presentationInput({ titles: true }), presentationInput({ focusId: 'UTM:SOC221H5' })]) {
+    for (const input of [presentationInput(), presentationInput({ titles: true }), presentationInput({ levels: new Set([300, 400]) })]) {
       const { presentation, geometry } = layout(input)
       topology.cells.forEach((row, l) => row.forEach(cell => {
         const labelled = cell.filter(v => isLabelled(presentation.cls[v]))
@@ -210,6 +213,43 @@ describe('geometry on the real UTM dataset', () => {
       }))
     }
     expect(wrappedCells).toBeGreaterThan(0)
+  })
+
+  it('never wraps a labelled cell while a course or program is selected: a tall chain cell makes a tall lane (owner decision 19.10)', () => {
+    const programAll = new Set(topology.nodes.filter(n => ['SOC', 'PSY', 'ENG'].includes(n.subject)).map(n => n.id))
+    const inputs: PresentationInput[] = [
+      presentationInput({ focusId: 'UTM:SOC100H5', chainTitles: 'direct' }),
+      presentationInput({ focusId: 'UTM:SOC100H5', chainTitles: 'all' }),
+      presentationInput({ focusId: 'UTM:PSY100Y5', hideUnrelated: true }),
+      presentationInput({ programIds: programAll }),
+      presentationInput({ programIds: programAll, focusId: 'UTM:ENG110Y5', titles: true }),
+    ]
+    for (const input of inputs) {
+      const { presentation, geometry } = layout(input)
+      const where = JSON.stringify({ focus: input.focusId, chainTitles: input.chainTitles, program: Boolean(input.programIds) })
+      expect(presentation.dimming).toBe(true)
+      expect(geometry.columns.every(column => column.tracks === 1), where).toBe(true)
+      expect(geometry.nodes.every(box => box.track === 0), where).toBe(true)
+      expect(geometryProblems(topology, presentation, geometry, measure), where).toEqual([])
+      // Not vacuous: some labelled cell is taller than its wrap threshold, so the overview would wrap it.
+      const rowH = (v: number) => Math.max(geometry.nodes[v].h, opt.rowHeight[presentation.cls[v] as 'full' | 'compact'])
+      const overTall = topology.cells.flat().filter(cell => {
+        const labelled = cell.filter(v => isLabelled(presentation.cls[v]))
+        const limit = labelled.some(v => presentation.cls[v] === 'full') ? opt.cellMaxHeight.full : opt.cellMaxHeight.compact
+        return labelled.length > 1 && labelled.reduce((sum, v) => sum + rowH(v), 0) > limit
+      })
+      expect(overTall.length, where).toBeGreaterThan(0)
+    }
+    // The SOC lane's biggest chain cell (SOC100H5, chain titles direct) wraps in the overview and
+    // stacks in one track during the selection, making the lane at least as tall as the stack.
+    const soc = topology.lanes.findIndex(lane => lane.subject === 'SOC')
+    const chain = layout(presentationInput({ focusId: 'UTM:SOC100H5', chainTitles: 'direct' }))
+    const labelledIn = (cell: number[]) => cell.filter(v => isLabelled(chain.presentation.cls[v]))
+    const col = topology.cells[soc].reduce((best, cell, c) => (labelledIn(cell).length > labelledIn(topology.cells[soc][best]).length ? c : best), 0)
+    const stacked = labelledIn(topology.cells[soc][col])
+    expect(stacked.length).toBeGreaterThan(40)
+    expect(layout(presentationInput()).geometry.columns[col].tracks).toBeGreaterThan(1)
+    expect(chain.geometry.lanes[soc].h).toBeGreaterThanOrEqual(2 * opt.lanePaddingY + stacked.reduce((sum, v) => sum + opt.rowHeight[chain.presentation.cls[v] as 'full' | 'compact'], 0) - 1e-6)
   })
 
   it('aligns mini grids: one perRow per column, first dot at col.x + dotInset, rows miniPitch apart', () => {
@@ -417,6 +457,16 @@ describe('geometry rules on synthetic layouts', () => {
     expect(g.lanes[0].h).toBe(24 + 13 * 22)
     expect(geometryProblems(topo, compact, g, stubMeasure(topo))).toEqual([])
 
+    // While dimming (a course or program selected, owner decision 19.10) the same cell never wraps:
+    // 25 rows stack in one track and the lane grows instead.
+    const dimmed = computeGeometry(topo, { ...compact, dimming: true }, stubMeasure(topo))
+    expect(dimmed.columns[0]).toMatchObject({ tracks: 1 })
+    expect(dimmed.columns[0].w).toBeCloseTo(dimmed.columns[0].trackW, 6)
+    expect(topo.cells[0][0].map(v => dimmed.nodes[v].track)).toEqual(Array(25).fill(0))
+    expect(topo.cells[0][0].map(v => dimmed.nodes[v].cy - dimmed.nodes[topo.cells[0][0][0]].cy)).toEqual(Array.from({ length: 25 }, (_, i) => i * 22))
+    expect(dimmed.lanes[0].h).toBe(24 + 25 * 22)
+    expect(geometryProblems(topo, { ...compact, dimming: true }, dimmed, stubMeasure(topo))).toEqual([])
+
     // One full node raises the cap to 720 (24 × 22 + 40 = 568: no wrap) ...
     const mixed = fake(topo, Object.fromEntries(codes.map((code, i) => [code, i === 3 ? 'full' as const : 'compact' as const])))
     expect(computeGeometry(topo, mixed, stubMeasure(topo)).columns[0].tracks).toBe(1)
@@ -515,22 +565,29 @@ describe('framing fit at the auto-frame floor (design-spec 8.1 tuning order, 10.
     }
   }
 
-  it('applies every tuning step and records the frames that still fall back to priority windows (known limits)', () => {
-    expect(opt).toMatchObject({ columnGap: 24, bandPadLeft: 10, bandPadRight: 8, fullLabelMax: 172 })
+  it('keeps tuning steps 2-3 with columnGap 28 and records the frames that fall back to priority windows (known limits)', () => {
+    // Owner decision 19.12 withdraws tuning step 1 (columnGap 28 → 24): smoother curves and fewer
+    // vertical buses in narrow gutters are worth the width; bandPad 10 / 8 and fullLabelMax 172 stay.
+    expect(opt).toMatchObject({ columnGap: 28, bandPadLeft: 10, bandPadRight: 8, fullLabelMax: 172 })
     const before = chain('CSC148H5', { columnGap: 28, bandPadLeft: 14, bandPadRight: 10, fullLabelMax: 184 }, 184)
+    const tuned24 = chain('CSC148H5', { columnGap: 24 })
     const csc = chain('CSC148H5')
     const mat = chain('MAT232H5')
-    console.log(`[graph] fit at 0.92: CSC148H5 chain ${before.full.toFixed(0)} → ${csc.full.toFixed(0)} px (needs ≤ ${(WIDE / FLOOR).toFixed(0)}), `
-      + `window 1/2 ${csc.window1.toFixed(0)} / ${csc.window2.toFixed(0)} px (1536 needs ≤ ${(STANDARD / FLOOR).toFixed(0)}); MAT232H5 prerequisites ${mat.prerequisites.toFixed(0)} px`)
-    // The tuning narrows the chain, but at 1920 × 1080 it still overshoots by about 2 % (real
-    // Segoe UI in Chromium: 1426 px against 1398), so 10.2 step 4 applies there: window 1 (focus,
-    // every prerequisite, direct unlocks) fits, and a pill counts the later unlocks.
-    expect(csc.full).toBeLessThan(before.full - 60)
+    console.log(`[graph] fit at 0.92: CSC148H5 chain ${before.full.toFixed(0)} (before tuning) → ${csc.full.toFixed(0)} px (${tuned24.full.toFixed(0)} with columnGap 24; `
+      + `needs ≤ ${(WIDE / FLOOR).toFixed(0)}), window 1/2 ${csc.window1.toFixed(0)} / ${csc.window2.toFixed(0)} px (1536 needs ≤ ${(STANDARD / FLOOR).toFixed(0)}); `
+      + `MAT232H5 prerequisites ${mat.prerequisites.toFixed(0)} px`)
+    // Steps 2-3 still narrow the chain; the 4 px wider column gap costs 4 px per labelled gap.
+    expect(csc.full).toBeLessThan(before.full - 40)
+    expect(csc.full).toBeGreaterThan(tuned24.full)
+    // Known limit, 1920 × 1080 with the panel open: the chain overshoots the 0.92 floor by about 4 %
+    // (real Segoe UI in Chromium: 1454 px against 1398; 1426 px with columnGap 24), so 10.2 step 4
+    // applies: window 1 (focus, every prerequisite, direct unlocks: 1078 px) fits, and a pill counts
+    // the later unlocks.
     expect(csc.full * FLOOR).toBeGreaterThan(WIDE)
-    expect(csc.full * FLOOR).toBeLessThan(WIDE * 1.05)
+    expect(csc.full * FLOOR).toBeLessThan(WIDE * 1.06)
     expect(csc.window1 * FLOOR).toBeLessThanOrEqual(WIDE)
-    // At 1536 × 864 even window 2 (focus, direct prerequisites, direct unlocks) is too wide (real
-    // Segoe UI: 1062 px against 1046): the frame centres the focus and pills show the rest.
+    // Known limit, 1536 × 864: even window 2 (focus, direct prerequisites, direct unlocks) is too wide
+    // (real Segoe UI: 1078 px against 1046): the frame centres the focus and pills show the rest.
     expect(csc.window2 * FLOOR).toBeGreaterThan(STANDARD)
     // MAT232H5: every prerequisite (MAT102H5 and MAT157H5 at the far left included) fits both frames.
     expect(mat.prerequisites * FLOOR).toBeLessThanOrEqual(STANDARD)
