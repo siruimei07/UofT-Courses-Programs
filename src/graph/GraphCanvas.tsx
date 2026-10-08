@@ -215,7 +215,7 @@ export function GraphCanvas(props: GraphCanvasProps) {
   )
   const focus = useMemo(() => presentation.role.indexOf('focus'), [presentation])
   const sceneInput = useMemo<SceneInput>(() => ({
-    topology, geometry, presentation, routes, text, tokens, focus, programActive, showAllEdges, options: OPT,
+    topology, geometry, presentation, routes, text, tokens, focus, programActive, showAllEdges,
   }), [topology, geometry, presentation, routes, text, tokens, focus, programActive, showAllEdges])
   const scene = useMemo(() => buildScene(sceneInput), [sceneInput])
   const grid = useMemo(() => buildHitGrid(geometry), [geometry])
@@ -440,6 +440,8 @@ export function GraphCanvas(props: GraphCanvasProps) {
     if (!handled && s.pendingFrame && s.pendingFrame.until > now) {
       const framed = frameTarget(s.pendingFrame.target, scene)
       if (framed) {
+        // Applied once: later geometry changes (toolbar toggles) anchor instead of reframing.
+        s.pendingFrame = null
         view = framed
         handled = true
       }
@@ -629,9 +631,9 @@ export function GraphCanvas(props: GraphCanvasProps) {
     if (junction >= 0) {
       const j = L.scene.junctions[junction]
       if (!j) return
-      const list = j.members.map(v => L.props.topology.nodes[v].code).join(', ')
+      const codes = j.members.map(v => L.props.topology.nodes[v].code).join(', ')
       tipOpen.current = true
-      setTip({ content: { kind: 'text', text: format(st.tipAnyOf, { list }) }, x: at.x, y: at.y })
+      setTip({ content: { kind: 'anyOf', template: st.tipAnyOf, codes }, x: at.x, y: at.y })
       return
     }
     const { presentation: p, topology: topo, dataset: data } = L.props
@@ -683,6 +685,8 @@ export function GraphCanvas(props: GraphCanvasProps) {
     rootRef.current?.focus({ preventScroll: true })
     s.keyboard = false
     settle()
+    // A pending or open tooltip would otherwise cover the new chain after the click (10.4).
+    hideTip()
     s.drag = { id: event.pointerId, x: event.clientX, y: event.clientY, lastX: event.clientX, lastY: event.clientY, moved: false }
     event.currentTarget.setPointerCapture(event.pointerId)
   }
@@ -896,8 +900,9 @@ export function GraphCanvas(props: GraphCanvasProps) {
     },
     frame: target => {
       settle()
-      s.pendingFrame = { target, until: performance.now() + FRAME_TTL }
+      // Framed now when possible; otherwise the next geometry (within FRAME_TTL) is framed once.
       const view = frameTarget(target, latest.current.scene)
+      s.pendingFrame = view ? null : { target, until: performance.now() + FRAME_TTL }
       if (view) setView(view, MOTION.frame)
     },
     centerOn: courseId => {

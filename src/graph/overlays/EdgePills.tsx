@@ -5,14 +5,72 @@ import { useCallback, useRef } from 'react'
 import type { Lang } from '../../app/store'
 import { format, formatNumber } from '../../i18n'
 import type { GraphStrings } from '../strings'
-import { countHidden, type PillTarget, type Side, type SideCount } from '../viewport'
+import { SCROLLBAR_CLEARANCE, countHidden, hiddenSide, type PillTarget, type Rect, type Side, type SideCount } from '../viewport'
 import { clamp, setShown, setTransform, useFrameLayout, type FrameBus, type FrameInfo } from './frame'
 
 const SIDES: readonly Side[] = ['left', 'right', 'top', 'bottom']
 const INSET = 10
-/** Clear of the 10 px scrollbars (16 px from the right / bottom edge). */
-const SCROLLBAR_CLEAR = 16
 const PILL_H = 24
+/** A pill keeps this far from chain labels and from the other pills; it slides in steps of SLIDE_STEP. */
+const LABEL_CLEAR = 4
+const PILL_CLEAR = 6
+const SLIDE_STEP = 6
+/** Screen box kept clear around the focus dot: its knockout and the plate to its right (7.5). */
+const FOCUS_CLEAR = { left: 14, right: 300, up: 42, down: 42 }
+
+/** One pill to place: its side, size, preferred top-left corner and the range it may slide over (along its edge). */
+export interface PillSlot {
+  side: Side
+  w: number
+  h: number
+  x: number
+  y: number
+  min: number
+  max: number
+}
+
+const overlap = (a: Rect, b: Rect, pad: number) =>
+  Math.max(0, Math.min(a.x + a.w + pad, b.x + b.w) - Math.max(a.x - pad, b.x)) * Math.max(0, Math.min(a.y + a.h + pad, b.y + b.h) - Math.max(a.y - pad, b.y))
+
+/**
+ * Pill positions (10.3) that never cover a visible chain label, the focus or another pill: each pill
+ * slides along its edge (left and right pills vertically, top and bottom pills horizontally) to the
+ * free position nearest its preferred one. Where nothing is free, the position covering least wins.
+ */
+export function placePills(slots: readonly PillSlot[], obstacles: readonly Rect[]): Array<{ side: Side; x: number; y: number }> {
+  const placed: Rect[] = []
+  return slots.map(slot => {
+    const vertical = slot.side === 'left' || slot.side === 'right'
+    const start = vertical ? slot.y : slot.x
+    const at = (value: number): Rect => (vertical ? { x: slot.x, y: value, w: slot.w, h: slot.h } : { x: value, y: slot.y, w: slot.w, h: slot.h })
+    const cost = (rect: Rect) =>
+      obstacles.reduce((sum, box) => sum + overlap(rect, box, LABEL_CLEAR), 0) + placed.reduce((sum, box) => sum + 4 * overlap(rect, box, PILL_CLEAR), 0)
+    let best = at(clamp(start, slot.min, slot.max))
+    let bestCost = cost(best)
+    for (let k = 1; bestCost > 0 && k * SLIDE_STEP <= slot.max - slot.min + SLIDE_STEP; k++) {
+      for (const value of [start + k * SLIDE_STEP, start - k * SLIDE_STEP]) {
+        if (value < slot.min - 1e-6 || value > slot.max + 1e-6) continue
+        const rect = at(value)
+        const c = cost(rect)
+        if (c < bestCost) {
+          best = rect
+          bestCost = c
+          if (!c) break
+        }
+      }
+    }
+    placed.push(best)
+    return { side: slot.side, x: best.x, y: best.y }
+  })
+}
+
+/** Hides a pill; a pill that has keyboard focus first hands it to the graph region, never to <body>. */
+function hidePill(el: HTMLButtonElement): void {
+  if (el.style.display !== 'none' && el.ownerDocument.activeElement === el) {
+    el.closest<HTMLElement>('.gc-root')?.focus({ preventScroll: true })
+  }
+  setShown(el, false)
+}
 
 export function pillText(side: Side, count: SideCount, strings: GraphStrings, lang: Lang): string {
   const n = (value: number) => formatNumber(value, lang)
@@ -57,12 +115,13 @@ export function EdgePills({ bus, targets, anchor, strings, lang, onReveal }: Edg
     const counts = targets.length ? countHidden(view, plot, targets) : null
     const ax = anchor ? frame.toX(anchor.x) : plot.left + plot.width / 2
     const ay = anchor ? frame.toY(anchor.y) : plot.top + plot.height / 2
+    const slots: Array<PillSlot & { el: HTMLButtonElement }> = []
     for (const side of SIDES) {
       const el = els.current[side]
       if (!el) continue
       const count = counts?.[side]
       if (!count || !count.total) {
-        setShown(el, false)
+        hidePill(el)
         continue
       }
       const text = pillText(side, count, strings, lang)
@@ -75,17 +134,32 @@ export function EdgePills({ bus, targets, anchor, strings, lang, onReveal }: Edg
         widths.current[side] = el.offsetWidth
       }
       const w = widths.current[side] ?? 120
-      const right = frame.width - SCROLLBAR_CLEAR
-      const bottom = frame.height - SCROLLBAR_CLEAR
+      const right = frame.width - SCROLLBAR_CLEARANCE
+      const bottom = frame.height - SCROLLBAR_CLEARANCE
       const yMin = plot.top + INSET
       const yMax = bottom - PILL_H
       const xMin = plot.left + INSET
       const xMax = right - w
-      if (side === 'left') setTransform(el, xMin, clamp(ay - PILL_H / 2, yMin, yMax))
-      else if (side === 'right') setTransform(el, xMax, clamp(ay - PILL_H / 2, yMin, yMax))
-      else if (side === 'top') setTransform(el, clamp(ax - w / 2, xMin, xMax), yMin)
-      else setTransform(el, clamp(ax - w / 2, xMin, xMax), yMax)
+      const vertical = side === 'left' || side === 'right'
+      slots.push({
+        el, side, w, h: PILL_H,
+        x: side === 'left' ? xMin : side === 'right' ? xMax : clamp(ax - w / 2, xMin, xMax),
+        y: side === 'top' ? yMin : side === 'bottom' ? yMax : clamp(ay - PILL_H / 2, yMin, yMax),
+        min: vertical ? yMin : xMin,
+        max: vertical ? yMax : xMax,
+      })
     }
+    if (!slots.length) return
+    // Chain labels on screen (dot and label box of every visible target) and the focus with its plate.
+    const z = view.zoom
+    const obstacles: Rect[] = []
+    for (const target of targets) {
+      if (hiddenSide(view, plot, target)) continue
+      obstacles.push({ x: frame.toX(target.box.x), y: frame.toY(target.box.y), w: target.box.w * z, h: target.box.h * z })
+    }
+    if (anchor) obstacles.push({ x: ax - FOCUS_CLEAR.left, y: ay - FOCUS_CLEAR.up, w: FOCUS_CLEAR.left + FOCUS_CLEAR.right, h: FOCUS_CLEAR.up + FOCUS_CLEAR.down })
+    const spots = placePills(slots, obstacles)
+    slots.forEach((slot, i) => setTransform(slot.el, spots[i].x, spots[i].y))
   }, [targets, anchor, strings, lang])
   useFrameLayout(bus, layout)
 

@@ -58,10 +58,10 @@ export const WORLD_PLATE: PlateMetrics = {
   creditGap: 8,
 }
 
-/** Below zoom 0.86 the plate is drawn in screen px at code 12 / title 11.5 (8.12). */
+/** Below zoom 0.86 the plate is drawn in screen px at code 12 / title 11.5 (8.12); no text under 11.5. */
 export const SCREEN_PLATE: PlateMetrics = {
   code: { size: 12, weight: 700 },
-  credit: { size: 10, weight: 500 },
+  credit: { size: 11.5, weight: 500 },
   title: { size: 11.5, weight: 500 },
   wrap: 240,
   maxLines: 3,
@@ -142,11 +142,13 @@ export function formatCredits(credits: number): string {
 }
 
 // ---------------------------------------------------------------------------
-// Shared metrics state: one cache for every measurer, invalidated by font loads and language.
+// Shared metrics state: one width cache per text-measuring function (the canvas one is shared by
+// every measurer; an injected measureText never sees another's widths), all invalidated by font
+// loads and language changes.
 
 let version = 0
 let family: string | null = null
-const widths = new Map<string, number>()
+let widthCaches = new WeakMap<MeasureText, Map<string, number>>()
 const listeners = new Set<() => void>()
 let watching = false
 let probe = ''
@@ -178,6 +180,8 @@ function approxMeasure(text: string, font: string): number {
 }
 
 function cachedWidth(text: string, font: string, measure: MeasureText): number {
+  let widths = widthCaches.get(measure)
+  if (!widths) widthCaches.set(measure, (widths = new Map()))
   const key = `${font}\u0000${text}`
   let w = widths.get(key)
   if (w === undefined) {
@@ -195,7 +199,7 @@ export function textMetricsVersion(): number {
 export function invalidateTextMetrics(): void {
   version++
   family = null
-  widths.clear()
+  widthCaches = new WeakMap()
   listeners.forEach(listener => listener())
 }
 

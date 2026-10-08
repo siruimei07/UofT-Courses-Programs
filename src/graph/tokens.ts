@@ -108,7 +108,8 @@ const MISSING_SURFACE = 'Canvas'
 const SURFACE_KEYS = new Set(['surface', 'band', 'selPlateInk'])
 const TRANSPARENT_KEYS = new Set(['progWash', 'selWash', 'selGlow'])
 
-function forcedTokens(base: RenderTokens): RenderTokens {
+/** Forced colours (12): CanvasText for nodes, labels and edges, Highlight for the chain, GrayText for minis. */
+export function forcedTokens(base: RenderTokens): RenderTokens {
   const text = 'CanvasText'
   const highlight = 'Highlight'
   const grey = 'GrayText'

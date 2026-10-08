@@ -7,6 +7,7 @@ import { format, formatNumber } from '../../i18n'
 import type { Lang } from '../../app/store'
 import type { GraphStrings } from '../strings'
 import { laneBulletInkVar, laneToneVar } from '../tokens'
+import { laneTone } from '../topology'
 import type { Geometry, Topology } from '../types'
 import type { Counts } from './counts'
 import { clamp, px, setShown, setTransform, useFrameLayout, type FrameBus, type FrameInfo } from './frame'
@@ -22,12 +23,15 @@ const HIDE_BELOW = 22
 
 export type LaneAction = 'jump' | 'home' | 'only' | 'hide'
 
-interface LaneRow {
+export interface LaneRow {
   lane: number
   subject: string
   name: string
   title: string
+  /** Division label shown on this lane (null when another lane of the division carries it). */
   division: string | null
+  /** First visible lane of a later division: the 1.5 px division rule above it. */
+  divisionStart: boolean
   tone: 1 | 2
   meta: { text: string; needed?: string; unlocked?: string; neededN?: string; unlockedN?: string } | null
   slim: boolean
@@ -47,60 +51,95 @@ export interface LaneColumnProps {
   onAction(action: LaneAction, lane: number): void
 }
 
+export interface LaneRowInput {
+  topology: Topology
+  geometry: Geometry
+  counts: readonly Counts[]
+  focus: number
+  programActive: boolean
+  strings: GraphStrings
+  divisionLabels: Record<string, string>
+  lang: Lang
+}
+
+/**
+ * One row per visible lane. Tones come from laneTone (static order, never recoloured by filters);
+ * the division label sits on the lane geometry reserved it for (LaneBox.divisionLabel: the first
+ * lane of its division that is neither collapsed nor slim); the strong rule marks the first visible
+ * lane of each later division, as on the canvas.
+ */
+export function buildLaneRows({ topology, geometry, counts, focus, programActive, strings, divisionLabels, lang }: LaneRowInput): LaneRow[] {
+  const out: LaneRow[] = []
+  let lastDivision: string | null = null
+  topology.lanes.forEach((lane, i) => {
+    const box = geometry.lanes[i]
+    if (!box || box.collapsed || box.h <= 0) return
+    const divisionStart = lastDivision !== null && lane.division !== lastDivision
+    lastDivision = lane.division
+    const division = box.divisionLabel ? divisionLabels[lane.division] ?? lane.division : null
+    const c = counts[i]
+    let meta: LaneRow['meta']
+    if (focus >= 0) {
+      const neededN = formatNumber(c.needed, lang)
+      const unlockedN = formatNumber(c.unlocked, lang)
+      const needed = format(strings.countNeeded, { n: neededN })
+      const unlocked = format(strings.countUnlocked, { n: unlockedN })
+      meta = c.needed + c.unlocked > 0 || c.focus
+        ? { text: `${needed}${strings.sep}${unlocked}`, needed, unlocked, neededN, unlockedN }
+        : { text: strings.laneNone }
+    } else if (programActive) {
+      meta = { text: format(strings.laneInProgram, { n: formatNumber(c.program, lang) }) }
+    } else if (c.visible < c.total) {
+      meta = { text: format(strings.laneCoursesOf, { v: formatNumber(c.visible, lang), n: formatNumber(c.total, lang) }) }
+    } else {
+      meta = { text: c.total === 1 ? strings.laneCourse : format(strings.laneCourses, { n: formatNumber(c.total, lang) }) }
+    }
+    const title = lane.department
+      ? format(strings.laneTitle, { name: lane.name, code: lane.subject, department: lane.department })
+      : `${lane.name} (${lane.subject})`
+    out.push({
+      lane: i,
+      subject: lane.subject,
+      name: lane.name,
+      title,
+      division,
+      divisionStart,
+      tone: laneTone(topology, i),
+      meta,
+      slim: box.slim,
+      blockH: (division ? DIVISION_H : 0) + NAME_H + META_H,
+    })
+  })
+  return out
+}
+
+/**
+ * Positions one lane row. The height is written whenever it differs, not only on frames whose zoom
+ * or geometry changed: a lane that was off screen at that frame (skipped) would otherwise keep a
+ * 0 px height (no lane bar, no hover area) after it scrolls into view.
+ */
+export function placeLane(el: HTMLElement, top: number, h: number): void {
+  setTransform(el, 0, top)
+  const height = px(h)
+  if (el.style.height !== height) el.style.height = height
+}
+
 export function LaneColumn(props: LaneColumnProps) {
   const { bus, topology, geometry, counts, focus, programActive, strings, divisionLabels, lang, onAction } = props
   const laneEls = useRef(new Map<number, HTMLDivElement>())
   const labelEls = useRef(new Map<number, HTMLDivElement>())
+  const kebabEls = useRef(new Map<number, HTMLButtonElement>())
   const markerRef = useRef<HTMLDivElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
   const [menu, setMenu] = useState<{ lane: number; x: number; y: number } | null>(null)
+  /** Lane whose kebab gets focus back when the menu closes by Escape or an action. */
+  const restoreTo = useRef<number | null>(null)
   const measured = useRef(new Set<number>())
 
-  const rows = useMemo<LaneRow[]>(() => {
-    const out: LaneRow[] = []
-    const toneIndex = new Map<string, number>()
-    const seenDivision = new Set<string>()
-    topology.lanes.forEach((lane, i) => {
-      const box = geometry.lanes[i]
-      if (!box || box.collapsed || box.h <= 0) return
-      const k = toneIndex.get(lane.division) ?? 0
-      toneIndex.set(lane.division, k + 1)
-      const division = seenDivision.has(lane.division) ? null : divisionLabels[lane.division] ?? lane.division
-      seenDivision.add(lane.division)
-      const c = counts[i]
-      let meta: LaneRow['meta']
-      if (focus >= 0) {
-        const neededN = formatNumber(c.needed, lang)
-        const unlockedN = formatNumber(c.unlocked, lang)
-        const needed = format(strings.countNeeded, { n: neededN })
-        const unlocked = format(strings.countUnlocked, { n: unlockedN })
-        meta = c.needed + c.unlocked > 0 || c.focus
-          ? { text: `${needed}${strings.sep}${unlocked}`, needed, unlocked, neededN, unlockedN }
-          : { text: strings.laneNone }
-      } else if (programActive) {
-        meta = { text: format(strings.laneInProgram, { n: formatNumber(c.program, lang) }) }
-      } else if (c.visible < c.total) {
-        meta = { text: format(strings.laneCoursesOf, { v: formatNumber(c.visible, lang), n: formatNumber(c.total, lang) }) }
-      } else {
-        meta = { text: c.total === 1 ? strings.laneCourse : format(strings.laneCourses, { n: formatNumber(c.total, lang) }) }
-      }
-      const title = lane.department
-        ? format(strings.laneTitle, { name: lane.name, code: lane.subject, department: lane.department })
-        : `${lane.name} (${lane.subject})`
-      out.push({
-        lane: i,
-        subject: lane.subject,
-        name: lane.name,
-        title,
-        division,
-        tone: k % 2 === 0 ? 1 : 2,
-        meta,
-        slim: box.slim,
-        blockH: (division ? DIVISION_H : 0) + NAME_H + META_H,
-      })
-    })
-    return out
-  }, [topology, geometry, counts, focus, programActive, strings, divisionLabels, lang])
+  const rows = useMemo<LaneRow[]>(
+    () => buildLaneRows({ topology, geometry, counts, focus, programActive, strings, divisionLabels, lang }),
+    [topology, geometry, counts, focus, programActive, strings, divisionLabels, lang],
+  )
 
   useLayoutEffect(() => {
     measured.current.clear()
@@ -120,8 +159,7 @@ export function LaneColumn(props: LaneColumnProps) {
       const onScreen = bottom > 0 && top < plotH && h > 0.5
       setShown(el, onScreen)
       if (!onScreen) continue
-      setTransform(el, 0, top)
-      if (frame.scaleChanged) el.style.height = px(h)
+      placeLane(el, top, h)
       if (!label) continue
       const visTop = Math.max(top, 0)
       const visBottom = Math.min(bottom, plotH)
@@ -173,13 +211,15 @@ export function LaneColumn(props: LaneColumnProps) {
   }, [rows, focus, topology])
   useFrameLayout(bus, layout)
 
-  // Close the menu on outside clicks and on Escape.
+  // Close the menu on outside clicks and on Escape (which hands focus back to the kebab).
   useEffect(() => {
     if (!menu) return
     const close = (event: Event) => {
       if (event instanceof KeyboardEvent && event.key !== 'Escape') return
       if (event instanceof PointerEvent && (event.target as Element | null)?.closest?.('.gc-lane-menu')) return
       if (event instanceof KeyboardEvent) event.stopPropagation()
+      // A pointer press elsewhere moves focus itself; Escape and wheel would leave it on <body>.
+      if (!(event instanceof PointerEvent) && menuRef.current?.contains(document.activeElement)) restoreTo.current = menu.lane
       setMenu(null)
     }
     window.addEventListener('pointerdown', close, true)
@@ -194,7 +234,18 @@ export function LaneColumn(props: LaneColumnProps) {
 
   const menuRef = useRef<HTMLDivElement>(null)
   useLayoutEffect(() => {
-    menuRef.current?.querySelector<HTMLButtonElement>('button')?.focus()
+    if (menu) {
+      menuRef.current?.querySelector<HTMLButtonElement>('button')?.focus()
+      return
+    }
+    // Closing unmounts the focused item: focus returns to the lane's kebab (or the graph region
+    // when the lane is gone or off screen), never to <body>.
+    const lane = restoreTo.current
+    restoreTo.current = null
+    if (lane === null) return
+    const kebab = kebabEls.current.get(lane)
+    if (kebab?.isConnected && kebab.getClientRects().length) kebab.focus({ preventScroll: true })
+    else containerRef.current?.closest<HTMLElement>('.gc-root')?.focus({ preventScroll: true })
   }, [menu])
 
   const openMenu = (lane: number, button: HTMLElement) => {
@@ -218,6 +269,7 @@ export function LaneColumn(props: LaneColumnProps) {
 
   const run = (action: LaneAction) => {
     if (!menu) return
+    restoreTo.current = menu.lane
     onAction(action, menu.lane)
     setMenu(null)
   }
@@ -229,7 +281,7 @@ export function LaneColumn(props: LaneColumnProps) {
         {rows.map(row => (
           <div
             key={row.lane}
-            className={`gc-lane${row.slim ? ' is-slim' : ''}${row.division && row.lane !== rows[0]?.lane ? ' is-division-start' : ''}`}
+            className={`gc-lane${row.slim ? ' is-slim' : ''}${row.divisionStart ? ' is-division-start' : ''}`}
             ref={el => {
               if (el) laneEls.current.set(row.lane, el)
               else laneEls.current.delete(row.lane)
@@ -276,6 +328,10 @@ export function LaneColumn(props: LaneColumnProps) {
               <button
                 type="button"
                 className="gc-lane-kebab"
+                ref={el => {
+                  if (el) kebabEls.current.set(row.lane, el)
+                  else kebabEls.current.delete(row.lane)
+                }}
                 aria-label={format(strings.laneMenu, { name: row.name })}
                 aria-haspopup="menu"
                 aria-expanded={menu?.lane === row.lane}

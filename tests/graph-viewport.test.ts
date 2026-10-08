@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
-  FRAME_MARGIN_X, FRAME_MARGIN_Y, FRAME_ZOOM_FLOOR, ZOOM_MAX, ZOOM_MIN, anchorView, centerOnPoint, clampView, clampZoom,
+  FRAME_MARGIN_X, FRAME_MARGIN_Y, FRAME_ZOOM_FLOOR, SCROLLBAR_CLEARANCE, ZOOM_MAX, ZOOM_MIN, anchorView, centerOnPoint, clampView, clampZoom,
   countHidden, cubicBezier, fitWidthView, frameView, hiddenSide, lerpView, nudgeIntoView, revealSide, scrollThumb, stepZoom,
   toScreenX, toScreenY, toWorldX, toWorldY, viewFromThumb, visibleWorld, zoomAround, zoomAtCentre,
 } from '../src/graph/viewport'
@@ -128,6 +128,19 @@ describe('frameView (design-spec 10.2)', () => {
     expect(inside(v, { ...fits, y: fits.y, h: 1 })).toBe(true)
   })
 
+  it('accepts a priority window that fits with the 24 px left inset and the 16 px right margin (screen px)', () => {
+    const box: Rect = { x: 200, y: 400, w: 4000, h: 600 }
+    const z = FRAME_ZOOM_FLOOR
+    // Fills plot.width − 24 − 16 at 0.92 (half a px to spare); the old test ((w + 24) · z > plot − 32) rejected it.
+    const tight: Rect = { x: 900, y: 420, w: (plot.width - 24 - FRAME_MARGIN_X - 0.5) / z, h: 300 }
+    const v = frameView({ box, focus: { x: 1200, y: 600 }, windows: [tight] }, plot)
+    expect(screen(v, tight.x, 0).x).toBeCloseTo(plot.left + 24, 6)
+    expect(screen(v, tight.x + tight.w, 0).x).toBeLessThanOrEqual(plot.left + plot.width - FRAME_MARGIN_X)
+    const over: Rect = { ...tight, w: tight.w + 2 }
+    const fallback = frameView({ box, focus: { x: 1200, y: 600 }, windows: [over] }, plot)
+    expect(screen(fallback, 1200, 0).x).toBeCloseTo(plot.left + plot.width / 2, 6)
+  })
+
   it('centres the focus when no window fits', () => {
     const box: Rect = { x: 200, y: 400, w: 4000, h: 600 }
     const focus = { x: 2100, y: 600 }
@@ -206,6 +219,21 @@ describe('edge-of-view pills (10.3)', () => {
     expect(counts.right).toEqual({ pre: 0, unl: 2, prog: 0, total: 2 })
     expect(counts.bottom).toEqual({ pre: 1, unl: 1, prog: 0, total: 2 })
     expect(counts.top.total).toBe(0)
+  })
+
+  it('counts dots under the scrollbars (within 16 px of the right or bottom edge) as hidden', () => {
+    const right = plot.left + plot.width
+    const bottom = plot.top + plot.height
+    const at = (sx: number, sy: number) => ({ x: v.x + (sx - plot.left), y: v.y + (sy - plot.top) })
+    expect(hiddenSide(v, plot, at(right - SCROLLBAR_CLEARANCE - 1, 400))).toBeNull()
+    expect(hiddenSide(v, plot, at(right - 10, 400))).toBe('right')
+    expect(hiddenSide(v, plot, at(600, bottom - 12))).toBe('bottom')
+    expect(hiddenSide(v, plot, at(600, bottom - SCROLLBAR_CLEARANCE - 1))).toBeNull()
+    const counts = countHidden(v, plot, [target(v.x + plot.width - 8, 400, 'unl')])
+    expect(counts.right.unl).toBe(1)
+    // Revealing it brings the dot clear of the scrollbar.
+    const revealed = revealSide(v, plot, [target(v.x + plot.width - 8, 400, 'unl')], 'right')
+    expect(hiddenSide(revealed, plot, { x: v.x + plot.width - 8, y: 400 })).toBeNull()
   })
 
   it('reveals the nearest hidden group without changing the zoom', () => {

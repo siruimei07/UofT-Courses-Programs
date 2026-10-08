@@ -2,7 +2,8 @@
 // presentation + geometry + routes into draw-ready lists once per state change; drawScene() paints
 // one frame for a view with viewport culling, one Path2D per edge group stroked once with an opaque
 // colour, and one batched fill per dot class and band parity. Pure apart from the canvas context.
-import { DEFAULT_GEOMETRY_OPTIONS } from './geometry'
+import { geometryOptions } from './geometry'
+import { plainEdgePaths, plainEdgeStubs } from './routes'
 import type { LabelMeasurer, LabelText, PlateLayout } from './text'
 import { TEXT } from './text'
 import type { RenderTokens } from './tokens'
@@ -57,6 +58,8 @@ export const RENDER = {
   ring: {
     program: { offset: 3.5, width: 1.5 },
     programChain: { offset: 3.5, width: 2 },
+    /** Faint amber ring of a program course drawn as a mini dot. */
+    programMini: { offset: 2, width: 1, alpha: 0.55 },
     available: { offset: 3.5, width: 1.5 },
     availableOuter: { offset: 6.5, width: 1.5 },
     hover: { offset: 4, width: 1.25 },
@@ -71,10 +74,10 @@ export const RENDER = {
   completedRadius: 2,
   /** Semantic zoom (8.12): titles at z ≥ 0.88, codes at z ≥ 0.73, world plate at z ≥ 0.86. */
   zoom: { titles: 0.88, codes: 0.73, worldPlate: 0.86 },
-  /** Long-edge stubs (8.10). */
-  stub: { source: 14, target: 10, terminal: 1.5, laneSpan: 3 },
-  /** Edge anchors and curves (8.7). */
-  port: { outInset: 2, entryInset: 2, miniPort: 3, sStep: 14, kMin: 16, kMax: 240, kFactor: 0.45 },
+  /** Long-edge stubs (8.10): 3+ visible lanes apart or more than 320 world px apart vertically; the stub paths come from routes.ts. */
+  stub: { source: 14, target: 10, terminal: 1.5, laneSpan: 3, maxDy: 320 },
+  /** Below the code threshold the out-port is the dot's right edge + 1 (cx + r + 1). */
+  dotPortGap: 1,
   junction: { radius: 3.5, stroke: 1.5 },
   /** Label layout (8.6), relative to the dot centre. */
   label: { codeFull: -8, titleFull: 8.5, codeCompact: 0.5, halfFull: 15.5, halfCompact: 8, knockoutPad: 3 },
@@ -90,6 +93,8 @@ export interface Ring {
   r: number
   width: number
   color: string
+  /** Stroke opacity (1 when omitted). */
+  alpha?: number
 }
 
 export interface NodeDraw {
@@ -114,6 +119,14 @@ export interface NodeDraw {
 
 export interface EdgeDraw {
   segs: PathSegment[]
+  /**
+   * Below the code threshold (z < 0.73, labels hidden) the edge starts at the source dot: a
+   * straight lead from (cx + r + 1, cy) to the first point. Null for minis, the focus and paths
+   * that do not start on the source row.
+   */
+  lead: { x: number; y: number } | null
+  /** Layout edge index (Topology.edges) for edge, stub and hover draws; -1 for bundle and fork shapes. */
+  edge: number
   x0: number
   y0: number
   x1: number
@@ -166,6 +179,8 @@ export interface SceneInput {
 export interface Scene {
   input: SceneInput
   options: GeometryOptions
+  /** Edges of the faint picture (edges and stubs): their wrapped-track row gaps are planned together. */
+  planWith: number[]
   world: World
   nodes: NodeDraw[]
   /** Visible rank of each lane in display order; -1 when collapsed. */
@@ -207,18 +222,22 @@ export interface FrameStats {
   labels: number
 }
 
-const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value))
 const isChainRole = (role: NodeRole) => role !== 'none' && role !== 'program'
 
-/** Geometry options merged over the defaults (geometry.ts owns the values). */
-export function renderOptions(options?: GeometryOptions): GeometryOptions {
-  return options ?? DEFAULT_GEOMETRY_OPTIONS
+/** The options the geometry was laid out with (geometry.ts owns the values), unless overridden. */
+export function renderOptions(geometry: Geometry, options?: GeometryOptions): GeometryOptions {
+  return options ?? geometryOptions(geometry)
 }
 
 // ---------------------------------------------------------------------------
 // Node styles (7.1-7.3)
 
-function nodeStyle(i: number, input: SceneInput, recordActive: boolean): Pick<NodeDraw, 'r' | 'glyph' | 'color' | 'rings' | 'codeColor'> {
+/**
+ * Glyph, radius, colours and rings of one node (7.1-7.3). Program courses get the amber ring in
+ * program mode and, compact, outside the chain during a selection (owner decision 19.7); program
+ * courses drawn as minis keep a faint amber ring.
+ */
+export function nodeStyle(i: number, input: SceneInput, recordActive: boolean): Pick<NodeDraw, 'r' | 'glyph' | 'color' | 'rings' | 'codeColor'> {
   const { presentation: p, tokens: t, focus, programActive } = input
   const role = p.role[i]
   const cls = p.cls[i]
@@ -228,6 +247,11 @@ function nodeStyle(i: number, input: SceneInput, recordActive: boolean): Pick<No
   let color = cls === 'mini' ? t.nodeMini : t.nodeDefault
   let codeColor = t.ink
   const rings: Ring[] = []
+  if (cls === 'mini') {
+    const ring = RENDER.ring.programMini
+    if (programActive && p.inProgram[i]) rings.push({ r: R.mini + ring.offset, width: ring.width, color: t.nodeProgram, alpha: ring.alpha })
+    return { r: R.mini, glyph: 'disc', color: t.nodeMini, rings, codeColor }
+  }
   switch (role) {
     case 'focus':
       if (programActive && p.inProgram[i]) {
@@ -255,18 +279,14 @@ function nodeStyle(i: number, input: SceneInput, recordActive: boolean): Pick<No
       color = t.nodeUnlockTransitive
       break
     case 'program':
+      // Program mode: full + ring. During a selection: compact amber + ring (7.3, 19.7).
       color = t.nodeProgram
-      if (focus >= 0) {
-        r = R.programOutside
-      } else {
-        r = R.program
-        rings.push({ r: r + RENDER.ring.program.offset, width: RENDER.ring.program.width, color: t.nodeProgram })
-      }
+      r = focus >= 0 && cls !== 'full' ? R.programOutside : R.program
+      rings.push({ r: r + RENDER.ring.program.offset, width: RENDER.ring.program.width, color: t.nodeProgram })
       break
     default:
       break
   }
-  if (cls === 'mini') return { r: R.mini, glyph: 'disc', color: t.nodeMini, rings: [], codeColor }
   if (programActive && focus >= 0 && p.inProgram[i] && isChainRole(role)) {
     rings.push({ r: r + RENDER.ring.programChain.offset, width: RENDER.ring.programChain.width, color: t.nodeProgram })
   }
@@ -283,14 +303,13 @@ function nodeStyle(i: number, input: SceneInput, recordActive: boolean): Pick<No
 }
 
 // ---------------------------------------------------------------------------
-// Edge paths (8.7)
+// Edge paths. Anchors and curves (8.7), including the wrapped-track detours, and the long-edge
+// stubs (8.10) come from plainEdgePaths / plainEdgeStubs in routes.ts: the same maths as routed
+// edges. This module only adds the low-zoom lead and groups paths for stroking.
 
-interface Port {
-  x: number
-  y: number
-}
+type Point = { x: number; y: number }
 
-/** Rightmost x of a node's track content: the out-port of a labelled node. */
+/** Left edge of a node's track (the dot sits dotInset to its right). */
 function trackLeft(scene: Pick<Scene, 'options'>, cx: number): number {
   return cx - scene.options.dotInset
 }
@@ -299,82 +318,7 @@ function columnOf(input: SceneInput, i: number) {
   return input.geometry.columns[input.topology.nodes[i].col]
 }
 
-function rowHeight(input: SceneInput, scene: Pick<Scene, 'options'>, i: number): number {
-  const box = input.geometry.nodes[i]
-  if (box.h > 0) return box.h
-  const cls = box.cls === 'hidden' ? 'compact' : box.cls
-  return scene.options.rowHeight[cls]
-}
-
-function bezier(from: Port, to: Port, kFactor = RENDER.port.kFactor): PathSegment {
-  const k = clamp(kFactor * (to.x - from.x), RENDER.port.kMin, RENDER.port.kMax)
-  return { op: 'C', x1: from.x + k, y1: from.y, x2: to.x - k, y2: to.y, x: to.x, y: to.y }
-}
-
-/** S-step of `run` px between two rows, horizontal tangents at both ends. */
-function sStep(from: Port, to: Port): PathSegment {
-  const mid = (from.x + to.x) / 2
-  return { op: 'C', x1: mid, y1: from.y, x2: mid, y2: to.y, x: to.x, y: to.y }
-}
-
-/**
- * Plain left-to-right curve between two nodes (8.7) with the wrapped-track detours; used for
- * faint overview edges and the hover preview. Returns world segments.
- */
-export function plainEdge(scene: Pick<Scene, 'input' | 'options' | 'nodes'>, from: number, to: number): PathSegment[] {
-  const { input } = scene
-  const a = input.geometry.nodes[from]
-  const b = input.geometry.nodes[to]
-  const segs: PathSegment[] = []
-  const port = RENDER.port
-  const targetBelow = b.cy >= a.cy
-  // Source side.
-  let start: Port
-  if (a.cls === 'mini') {
-    start = { x: a.cx + port.miniPort, y: a.cy }
-    segs.push({ op: 'M', ...start })
-  } else {
-    const col = columnOf(input, from)
-    const trackW = col.trackW || col.w
-    const out = { x: trackLeft(scene, a.cx) + trackW - port.outInset, y: a.cy }
-    segs.push({ op: 'M', ...out })
-    start = out
-    if (col.tracks > 1 && a.track < col.tracks - 1) {
-      const gapY = a.cy + (targetBelow ? 1 : -1) * rowHeight(input, scene, from) / 2
-      const stepEnd = { x: out.x + port.sStep, y: gapY }
-      segs.push(sStep(out, stepEnd))
-      const colOut = { x: col.x + col.w - port.outInset, y: gapY }
-      if (colOut.x > stepEnd.x) segs.push({ op: 'L', ...colOut })
-      start = colOut.x > stepEnd.x ? colOut : stepEnd
-    }
-  }
-  // Target side.
-  if (b.cls === 'mini') {
-    segs.push(bezier(start, { x: b.cx - port.miniPort, y: b.cy }))
-    return segs
-  }
-  const col = columnOf(input, to)
-  const left = trackLeft(scene, b.cx)
-  const r = scene.nodes[to]?.r ?? RENDER.radius.compact
-  const dotEntry = b.cx - r - 1
-  if (col.tracks > 1 && b.track > 0) {
-    const gapY = b.cy + (targetBelow ? -1 : 1) * rowHeight(input, scene, to) / 2
-    const arrive = { x: col.x - port.entryInset, y: gapY }
-    segs.push(bezier(start, arrive))
-    const stepStart = { x: left - port.sStep - port.entryInset, y: gapY }
-    if (stepStart.x > arrive.x) segs.push({ op: 'L', ...stepStart })
-    const into = { x: left - port.entryInset, y: b.cy }
-    segs.push(sStep(stepStart.x > arrive.x ? stepStart : arrive, into))
-    segs.push({ op: 'L', x: dotEntry, y: b.cy })
-    return segs
-  }
-  const entry = { x: left - port.entryInset, y: b.cy }
-  segs.push(bezier(start, entry))
-  if (dotEntry > entry.x) segs.push({ op: 'L', x: dotEntry, y: b.cy })
-  return segs
-}
-
-export function edgeDraw(segs: PathSegment[]): EdgeDraw {
+export function edgeDraw(segs: PathSegment[], lead: Point | null = null, edge = -1): EdgeDraw {
   let x0 = Infinity
   let y0 = Infinity
   let x1 = -Infinity
@@ -385,6 +329,7 @@ export function edgeDraw(segs: PathSegment[]): EdgeDraw {
     if (y < y0) y0 = y
     if (y > y1) y1 = y
   }
+  if (lead) add(lead.x, lead.y)
   for (const s of segs) {
     if (s.op === 'C') {
       add(s.x1, s.y1)
@@ -392,7 +337,30 @@ export function edgeDraw(segs: PathSegment[]): EdgeDraw {
     }
     add(s.x, s.y)
   }
-  return { segs, x0, y0, x1, y1 }
+  return { segs, lead, edge, x0, y0, x1, y1 }
+}
+
+/**
+ * Low-zoom out-port (finding: edges floating a track-width right of their dots when codes are
+ * hidden): a lead from cx + r + 1 to the path start, for labelled sources whose path leaves on
+ * their own row. The focus keeps its plate, minis already start at cx + 3.
+ */
+function sourceLead(scene: Pick<Scene, 'input' | 'nodes'>, from: number, first: PathSegment | undefined): Point | null {
+  const n = scene.nodes[from]
+  if (!first || !n?.labelled || n.glyph === 'focus') return null
+  const box = scene.input.geometry.nodes[from]
+  const x = box.cx + n.r + RENDER.dotPortGap
+  if (Math.abs(first.y - box.cy) > 0.5 || first.x <= x + 0.5) return null
+  return { x, y: box.cy }
+}
+
+/** Long overview edge (8.10): 3 or more visible lanes apart, or more than 320 world px apart vertically. */
+export function isLongEdge(scene: Pick<Scene, 'input' | 'laneRank'>, e: number): boolean {
+  const { topology, geometry } = scene.input
+  const { from, to } = topology.edges[e]
+  const ra = scene.laneRank[topology.nodes[from].lane]
+  const rb = scene.laneRank[topology.nodes[to].lane]
+  return Math.abs(ra - rb) >= RENDER.stub.laneSpan || Math.abs(geometry.nodes[to].cy - geometry.nodes[from].cy) > RENDER.stub.maxDy
 }
 
 function edgeColor(role: EdgeRole, t: RenderTokens): string {
@@ -406,17 +374,18 @@ function edgeColor(role: EdgeRole, t: RenderTokens): string {
   }
 }
 
-function routeWidth(role: EdgeRole, shape: Routes['paths'][number]['shape']): number {
+/** Screen width of a routed path (3.3); forced colours draw transitive edges at 1 px (12). */
+export function routeWidth(role: EdgeRole, shape: Routes['paths'][number]['shape'], forced = false): number {
   const E = RENDER.edge
   if (shape === 'trunk') return E.trunk
   if (shape === 'branch') return E.branch
   if (shape === 'fork') return E.fork
   if (role === 'prereq-direct' || role === 'unlock-direct') return E.direct
   if (role === 'program') return E.program
-  return E.transitive
+  return forced ? 1 : E.transitive
 }
 
-function lastPoint(segs: readonly PathSegment[]): { x: number; y: number } | null {
+function lastPoint(segs: readonly PathSegment[]): Point | null {
   const s = segs[segs.length - 1]
   return s ? { x: s.x, y: s.y } : null
 }
@@ -432,7 +401,7 @@ export function labelGeometry(scene: Pick<Scene, 'options'>, box: { cx: number; 
 
 export function buildScene(input: SceneInput): Scene {
   const { topology, geometry, presentation: p, tokens: t, focus } = input
-  const options = renderOptions(input.options)
+  const options = renderOptions(geometry, input.options)
   const recordActive = p.record.some(r => r !== null)
   const base = { options }
 
@@ -483,6 +452,7 @@ export function buildScene(input: SceneInput): Scene {
     faint: [],
     stubs: [],
     stubDots: [],
+    planWith: [],
     routeLayers: [[], []],
     junctions: [],
     plate: null,
@@ -517,43 +487,47 @@ export function buildScene(input: SceneInput): Scene {
 
 function buildFaint(scene: Scene): void {
   const { input } = scene
-  const { topology, presentation: p, tokens: t } = input
+  const { topology, presentation: p, tokens: t, geometry } = input
   const overview = !p.dimming
   const stubsOn = overview && !input.showAllEdges
   const color = overview ? t.edgeFaint : t.edgeUnrelated
   const width = overview ? RENDER.edge.faint : RENDER.edge.unrelated
   const solid: StrokeGroup = { color, width, dashed: false, edges: [] }
   const dashed: StrokeGroup = { color, width, dashed: true, edges: [] }
+  const full: number[] = []
+  const long: number[] = []
   topology.edges.forEach((edge, e) => {
-    if (p.edgeRole[e] !== 'faint') return
-    const a = scene.nodes[edge.from]
-    const b = scene.nodes[edge.to]
-    if (!a.visible || !b.visible) return
-    const ra = scene.laneRank[topology.nodes[edge.from].lane]
-    const rb = scene.laneRank[topology.nodes[edge.to].lane]
-    if (stubsOn && Math.abs(ra - rb) >= RENDER.stub.laneSpan) {
-      addStubs(scene, edge.from, edge.to)
-      return
-    }
-    ;(edge.kind === 'coreq' ? dashed : solid).edges.push(edgeDraw(plainEdge(scene, edge.from, edge.to)))
+    if (p.edgeRole[e] !== 'faint' || !scene.nodes[edge.from].visible || !scene.nodes[edge.to].visible) return
+    ;(stubsOn && isLongEdge(scene, e) ? long : full).push(e)
   })
+  // Faint edges and stubs start at the out-port: no leader (8.7). Both take their wrapped-track
+  // row-gap sides from the whole picture, so a gap never carries two edges that meet in one column.
+  // A dense wrapped cell may have no free gap slot for an anchor: the faint edge then stops at the
+  // column edge with a terminal dot rather than meet an edge of the other direction in one gap.
+  const planWith = [...full, ...long]
+  scene.planWith = planWith
+  const cuts: Point[] = []
+  const options = { presentation: p, planWith, truncateUnplaced: true, onTruncate: (_e: number, x: number, y: number) => cuts.push({ x, y }) }
+  const paths = full.length ? plainEdgePaths(topology, geometry, full, options) : []
+  full.forEach((e, k) => {
+    const edge = topology.edges[e]
+    ;(edge.kind === 'coreq' ? dashed : solid).edges.push(edgeDraw(paths[k], sourceLead(scene, edge.from, paths[k][0]), e))
+  })
+  const stubs = long.length ? plainEdgeStubs(topology, geometry, long, options) : []
+  long.forEach((e, k) => {
+    const { source, target } = stubs[k]
+    if (source.length) {
+      scene.stubs.push(edgeDraw(source, sourceLead(scene, topology.edges[e].from, source[0]), e))
+      const end = source[source.length - 1]
+      scene.stubDots.push({ x: end.x, y: end.y })
+    }
+    if (target.length) {
+      scene.stubs.push(edgeDraw(target, null, e))
+      scene.stubDots.push({ x: target[0].x, y: target[0].y })
+    }
+  })
+  scene.stubDots.push(...cuts)
   scene.faint = [solid, dashed].filter(group => group.edges.length)
-}
-
-function addStubs(scene: Scene, from: number, to: number): void {
-  const segs = plainEdge(scene, from, to)
-  const start = segs[0]
-  const S = RENDER.stub
-  const sx = start.x + S.source
-  scene.stubs.push(edgeDraw([{ op: 'M', x: start.x, y: start.y }, { op: 'L', x: sx, y: start.y }]))
-  scene.stubDots.push({ x: sx, y: start.y })
-  const b = scene.input.geometry.nodes[to]
-  const port = RENDER.port
-  const entry = b.cls === 'mini' ? b.cx - port.miniPort : trackLeft(scene, b.cx) - port.entryInset
-  const dotEntry = b.cls === 'mini' ? entry : b.cx - scene.nodes[to].r - 1
-  const tx = entry - S.target
-  scene.stubs.push(edgeDraw([{ op: 'M', x: tx, y: b.cy }, { op: 'L', x: Math.max(entry, dotEntry), y: b.cy }]))
-  scene.stubDots.push({ x: tx, y: b.cy })
 }
 
 function buildRoutes(scene: Scene): void {
@@ -565,7 +539,7 @@ function buildRoutes(scene: Scene): void {
     if (path.role === 'hidden' || path.role === 'faint' || !path.segments.length) continue
     const direct = path.role === 'prereq-direct' || path.role === 'unlock-direct' || path.shape !== 'edge'
     const color = edgeColor(path.role, t)
-    const width = routeWidth(path.role, path.shape)
+    const width = routeWidth(path.role, path.shape, t.forced)
     const dashed = path.kind === 'coreq' && path.shape !== 'fork'
     const key = `${direct ? 0 : transitiveOrder(path.role)}|${color}|${width}|${dashed}`
     const layer = layers[direct ? 1 : 0]
@@ -574,7 +548,7 @@ function buildRoutes(scene: Scene): void {
       group = { color, width, dashed, edges: [] }
       layer.set(key, group)
     }
-    group.edges.push(edgeDraw(path.segments))
+    group.edges.push(edgeDraw(path.segments, routeLead(scene, path), path.edge))
     if (path.shape === 'fork') {
       const first = path.segments[0]
       forks.push({ x: first.x, y: first.y })
@@ -618,19 +592,41 @@ function buildOverflowLabels(scene: Scene): void {
   })
 }
 
-/** Hover preview (8.10): every visible edge of one node, as plain full-length curves. */
+/**
+ * Low-zoom lead of a routed path: plain edges and prerequisite-fan branches leave their source
+ * node on its row; trunks, unlock branches and forks start at bundle points or the focus.
+ */
+function routeLead(scene: Scene, path: Routes['paths'][number]): Point | null {
+  if (path.edge < 0 || (path.shape !== 'edge' && !(path.shape === 'branch' && path.role === 'prereq-direct'))) return null
+  return sourceLead(scene, scene.input.topology.edges[path.edge].from, path.segments[0])
+}
+
+/**
+ * Hover preview (8.10): every visible edge of one node at full length, as plain anchored curves
+ * (no corridors, for speed) with the highlighted-edge leader.
+ */
 export function hoverEdges(scene: Scene, index: number): FrameState['hoverEdges'] {
   if (index < 0) return null
-  const { topology, presentation: p } = scene.input
-  const solid: EdgeDraw[] = []
-  const dashed: EdgeDraw[] = []
+  const { topology, presentation: p, geometry } = scene.input
+  const list: number[] = []
   topology.edges.forEach((edge, e) => {
     if (edge.from !== index && edge.to !== index) return
     if (p.edgeRole[e] === 'hidden') return
-    if (!scene.nodes[edge.from].visible || !scene.nodes[edge.to].visible) return
-    ;(edge.kind === 'coreq' ? dashed : solid).push(edgeDraw(plainEdge(scene, edge.from, edge.to)))
+    if (scene.nodes[edge.from].visible && scene.nodes[edge.to].visible) list.push(e)
   })
-  return solid.length || dashed.length ? { solid, dashed } : null
+  if (!list.length) return null
+  // Same row-gap sides as the faint picture underneath (the same plan, made once per scene), plus
+  // this node's own edges where some are not in it (Show all connections off during a selection).
+  const drawn = new Set(scene.planWith)
+  const planWith = list.every(e => drawn.has(e)) ? scene.planWith : [...scene.planWith, ...list.filter(e => !drawn.has(e))]
+  const paths = plainEdgePaths(topology, geometry, list, { presentation: p, leader: true, planWith })
+  const solid: EdgeDraw[] = []
+  const dashed: EdgeDraw[] = []
+  list.forEach((e, k) => {
+    const edge = topology.edges[e]
+    ;(edge.kind === 'coreq' ? dashed : solid).push(edgeDraw(paths[k], sourceLead(scene, edge.from, paths[k][0]), e))
+  })
+  return { solid, dashed }
 }
 
 // ---------------------------------------------------------------------------
@@ -686,15 +682,21 @@ interface Xf {
   dpr: number
 }
 
+/** Paints the selection wash again inside `clip` (knockouts would otherwise punch holes in it). */
+type Rewash = (clip: Path2D) => void
+
 const X = (xf: Xf, x: number) => xf.ox + x * xf.z
 const Y = (xf: Xf, y: number) => xf.oy + y * xf.z
 
-function addSegments(path: Path2D, segs: readonly PathSegment[], xf: Xf): void {
-  for (const s of segs) {
+/** Appends an edge; below the code threshold a lead from the source dot replaces the path's first move. */
+function addEdge(path: Path2D, e: EdgeDraw, xf: Xf, lowZoom: boolean): void {
+  const lead = lowZoom ? e.lead : null
+  if (lead) path.moveTo(X(xf, lead.x), Y(xf, lead.y))
+  e.segs.forEach((s, i) => {
     if (s.op === 'C') path.bezierCurveTo(X(xf, s.x1), Y(xf, s.y1), X(xf, s.x2), Y(xf, s.y2), X(xf, s.x), Y(xf, s.y))
-    else if (s.op === 'M') path.moveTo(X(xf, s.x), Y(xf, s.y))
+    else if (s.op === 'M' && !(lead && i === 0)) path.moveTo(X(xf, s.x), Y(xf, s.y))
     else path.lineTo(X(xf, s.x), Y(xf, s.y))
-  }
+  })
 }
 
 interface Cull {
@@ -706,12 +708,13 @@ interface Cull {
 
 const intersects = (e: EdgeDraw, c: Cull) => e.x1 >= c.x0 && e.x0 <= c.x1 && e.y1 >= c.y0 && e.y0 <= c.y1
 
-function strokeEdges(ctx: CanvasRenderingContext2D, edges: readonly EdgeDraw[], color: string, width: number, dashed: boolean, xf: Xf, cull: Cull): number {
+/** One Path2D per group, stroked once with an opaque colour (3.3). */
+function strokeEdges(ctx: CanvasRenderingContext2D, edges: readonly EdgeDraw[], color: string, width: number, dashed: boolean, xf: Xf, cull: Cull, lowZoom: boolean): number {
   const path = new Path2D()
   let count = 0
   for (const e of edges) {
     if (!intersects(e, cull)) continue
-    addSegments(path, e.segs, xf)
+    addEdge(path, e, xf, lowZoom)
     count++
   }
   if (!count) return 0
@@ -723,10 +726,14 @@ function strokeEdges(ctx: CanvasRenderingContext2D, edges: readonly EdgeDraw[], 
   return count
 }
 
-/** Device-pixel snapping for a horizontal rule of `width` CSS px. */
-function snapLine(v: number, width: number, dpr: number): number {
+/**
+ * Lane separator snapped to device pixels (8.13): the centre y and stroke width of a `width` CSS px
+ * rule whose bottom edge lies on the device-pixel boundary nearest `v`, so it covers the same
+ * pixels as the lane column's `border-bottom` (and the division rule's ::before).
+ */
+export function separatorLine(v: number, width: number, dpr: number): { y: number; width: number } {
   const device = Math.max(1, Math.round(width * dpr))
-  return (Math.round(v * dpr) + (device % 2) / 2) / dpr
+  return { y: (Math.round(v * dpr) - device / 2) / dpr, width: device / dpr }
 }
 
 const snap = (v: number, dpr: number) => Math.round(v * dpr) / dpr
@@ -786,32 +793,36 @@ export function drawScene(ctx: CanvasRenderingContext2D, scene: Scene, frame: Fr
   const showCodes = z >= RENDER.zoom.codes
   const showTitles = z >= RENDER.zoom.titles
 
-  // 3. Program wash on program label boxes.
-  if (scene.programWash && showCodes) {
-    ctx.fillStyle = t.progWash
-    ctx.beginPath()
-    for (const n of visible) {
-      if (!input.presentation.inProgram[n.index] || !n.labelled || !n.label) continue
-      const w = labelWidth(n, showTitles)
-      const pad = RENDER.label.knockoutPad
-      ctx.rect(X(xf, n.labelX - pad), Y(xf, n.boxY0), (w + 2 * pad) * z, (n.boxY1 - n.boxY0) * z)
-    }
-    ctx.fill()
-  }
+  // 3. The --prog-wash on program label boxes is painted right after the label knockouts (11),
+  //    which would otherwise cover it.
 
-  // 4. Selection row and column wash.
-  if (scene.wash) {
-    ctx.fillStyle = t.selWash
+  // 4. Selection row and column wash. Knockouts (mini halos, labels, dots, junctions, the focus)
+  //    fill with the plain band colour, so the wash is painted again over them, clipped to them.
+  const paintWash = () => {
+    if (!scene.wash) return
     const { row, col } = scene.wash
+    ctx.fillStyle = t.selWash
     ctx.fillRect(plot.left, Y(xf, row.y), plot.width, row.h * z)
     ctx.fillRect(X(xf, col.x), plot.top, col.w * z, contentBottom - plot.top)
   }
+  const rewash: Rewash | null = scene.wash
+    ? clip => {
+      const alpha = ctx.globalAlpha
+      ctx.save()
+      ctx.globalAlpha = 1
+      ctx.clip(clip)
+      paintWash()
+      ctx.restore()
+      ctx.globalAlpha = alpha
+    }
+    : null
+  paintWash()
 
   // 5. Lane separators and division rules.
   drawLaneRules(ctx, scene, xf, plot)
 
   // 6-9. Edges.
-  stats.edges += drawEdges(ctx, scene, frame, xf, cull)
+  stats.edges += drawEdges(ctx, scene, frame, xf, cull, !showCodes, rewash)
 
   // 10. Mini dots: halo then dot, batched by band parity.
   const minis = visible.filter(n => n.cls === 'mini')
@@ -832,6 +843,7 @@ export function drawScene(ctx: CanvasRenderingContext2D, scene: Scene, frame: Fr
       if (any) {
         ctx.fillStyle = bg[parity]
         ctx.fill(path)
+        rewash?.(path)
       }
     }
     const dots = new Path2D()
@@ -844,35 +856,43 @@ export function drawScene(ctx: CanvasRenderingContext2D, scene: Scene, frame: Fr
     }
     ctx.fillStyle = t.nodeMini
     ctx.fill(dots)
+    strokeRings(ctx, minis, r, xf, geometry)
   }
 
   const labelled = visible.filter(n => n.labelled && n.index !== scene.plate?.index)
 
-  // 11. Label knockouts (two passes by parity).
+  // 11. Label knockouts (two passes by parity), then the selection wash again over them. In
+  //     program mode the --prog-wash of program label boxes (layer 3) goes on top of them.
   if (showCodes && labelled.length) {
-    ctx.globalAlpha = RENDER.knockoutAlpha
+    const pad = RENDER.label.knockoutPad
+    const programs = scene.programWash ? new Path2D() : null
     for (const parity of [0, 1] as const) {
-      ctx.beginPath()
+      const path = new Path2D()
       let any = false
       for (const n of labelled) {
         if (n.parity !== parity || !n.label) continue
         const w = labelWidth(n, showTitles)
-        const pad = RENDER.label.knockoutPad
         const y0 = showTitles || n.cls !== 'full' ? n.boxY0 : geometry.nodes[n.index].cy - RENDER.label.halfCompact - 8
         const y1 = showTitles || n.cls !== 'full' ? n.boxY1 : geometry.nodes[n.index].cy
-        ctx.rect(X(xf, n.labelX - pad), Y(xf, y0), (w + 2 * pad) * z, (y1 - y0) * z)
+        path.rect(X(xf, n.labelX - pad), Y(xf, y0), (w + 2 * pad) * z, (y1 - y0) * z)
+        if (programs && input.presentation.inProgram[n.index]) programs.rect(X(xf, n.labelX - pad), Y(xf, n.boxY0), (w + 2 * pad) * z, (n.boxY1 - n.boxY0) * z)
         any = true
       }
-      if (any) {
-        ctx.fillStyle = bg[parity]
-        ctx.fill()
-      }
+      if (!any) continue
+      ctx.globalAlpha = RENDER.knockoutAlpha
+      ctx.fillStyle = bg[parity]
+      ctx.fill(path)
+      ctx.globalAlpha = 1
+      rewash?.(path)
     }
-    ctx.globalAlpha = 1
+    if (programs) {
+      ctx.fillStyle = t.progWash
+      ctx.fill(programs)
+    }
   }
 
   // 12. Labelled dots, record glyphs and rings.
-  drawLabelledDots(ctx, scene, labelled, xf, bg)
+  drawLabelledDots(ctx, scene, labelled, xf, bg, rewash)
 
   // 13. Labels: codes, then titles; slim-lane "+n".
   if (showCodes) stats.labels = drawLabels(ctx, scene, labelled, xf, showTitles, frame.labelAlpha)
@@ -891,7 +911,7 @@ export function drawScene(ctx: CanvasRenderingContext2D, scene: Scene, frame: Fr
   }
 
   // 15. Focus glyph and plate.
-  if (scene.plate) drawFocus(ctx, scene, scene.plate, xf, bg, frame)
+  if (scene.plate) drawFocus(ctx, scene, scene.plate, xf, bg, frame, rewash)
 
   // 16. Keyboard cursor.
   if (frame.cursor >= 0 && nodes[frame.cursor]?.visible) drawCursor(ctx, scene, frame.cursor, xf, showCodes, showTitles)
@@ -920,40 +940,35 @@ function drawLaneRules(ctx: CanvasRenderingContext2D, scene: Scene, xf: Xf, plot
     if (scene.laneRank[i] > 0) {
       const top = Y(xf, lane.y)
       if (top >= plot.top - 2 && top <= plot.top + plot.height + 2) {
-        if (scene.divisionStart[i]) {
-          const sy = snapLine(top, 1.5, xf.dpr)
-          strong.moveTo(x0, sy)
-          strong.lineTo(x1, sy)
-        } else {
-          const sy = snapLine(top, 1, xf.dpr)
-          thin.moveTo(x0, sy)
-          thin.lineTo(x1, sy)
-        }
+        const { y } = separatorLine(top, scene.divisionStart[i] ? 1.5 : 1, xf.dpr)
+        const path = scene.divisionStart[i] ? strong : thin
+        path.moveTo(x0, y)
+        path.lineTo(x1, y)
       }
     }
   })
-  if (lastBottom >= plot.top && lastBottom <= plot.top + plot.height) {
-    const sy = snapLine(lastBottom, 1, xf.dpr)
-    thin.moveTo(x0, sy)
-    thin.lineTo(x1, sy)
+  if (lastBottom >= plot.top && lastBottom <= plot.top + plot.height + 2) {
+    const { y } = separatorLine(lastBottom, 1, xf.dpr)
+    thin.moveTo(x0, y)
+    thin.lineTo(x1, y)
   }
   ctx.setLineDash([])
   ctx.lineCap = 'butt'
   ctx.strokeStyle = t.line
-  ctx.lineWidth = Math.max(1, Math.round(xf.dpr)) / xf.dpr
+  ctx.lineWidth = separatorLine(0, 1, xf.dpr).width
   ctx.stroke(thin)
   ctx.strokeStyle = t.ruleStrong
-  ctx.lineWidth = Math.max(1, Math.round(1.5 * xf.dpr)) / xf.dpr
+  ctx.lineWidth = separatorLine(0, 1.5, xf.dpr).width
   ctx.stroke(strong)
 }
 
-function drawEdges(ctx: CanvasRenderingContext2D, scene: Scene, frame: FrameState, xf: Xf, cull: Cull): number {
+function drawEdges(ctx: CanvasRenderingContext2D, scene: Scene, frame: FrameState, xf: Xf, cull: Cull, lowZoom: boolean, rewash: Rewash | null): number {
   const { tokens: t } = scene.input
   let count = 0
   // 6. Faint edges, stubs (with terminal dots), unrelated edges.
-  for (const group of scene.faint) count += strokeEdges(ctx, group.edges, group.color, group.width, group.dashed, xf, cull)
+  for (const group of scene.faint) count += strokeEdges(ctx, group.edges, group.color, group.width, group.dashed, xf, cull, lowZoom)
   if (scene.stubs.length) {
-    count += strokeEdges(ctx, scene.stubs, t.edgeFaint, RENDER.edge.faint, false, xf, cull)
+    count += strokeEdges(ctx, scene.stubs, t.edgeFaint, RENDER.edge.faint, false, xf, cull, lowZoom)
     const dots = new Path2D()
     const r = RENDER.stub.terminal
     for (const d of scene.stubDots) {
@@ -969,32 +984,33 @@ function drawEdges(ctx: CanvasRenderingContext2D, scene: Scene, frame: FrameStat
   // 7-8. Chain / program routes (opacity only during the motion fade-in).
   ctx.globalAlpha = frame.edgeAlpha
   for (const layer of scene.routeLayers) {
-    for (const group of layer) count += strokeEdges(ctx, group.edges, group.color, group.width, group.dashed, xf, cull)
+    for (const group of layer) count += strokeEdges(ctx, group.edges, group.color, group.width, group.dashed, xf, cull, lowZoom)
   }
   if (scene.junctions.length) {
     const J = RENDER.junction
     for (const j of scene.junctions) {
-      ctx.beginPath()
-      ctx.arc(X(xf, j.x), Y(xf, j.y), Math.max(J.radius * xf.z, 2), 0, Math.PI * 2)
+      const disc = new Path2D()
+      disc.arc(X(xf, j.x), Y(xf, j.y), Math.max(J.radius * xf.z, 2), 0, Math.PI * 2)
       ctx.fillStyle = t.surface
-      ctx.fill()
+      ctx.fill(disc)
+      rewash?.(disc)
       ctx.setLineDash([])
       ctx.strokeStyle = t.nodePrereqDirect
       ctx.lineWidth = J.stroke
-      ctx.stroke()
+      ctx.stroke(disc)
     }
   }
   ctx.globalAlpha = 1
   // 9. Hover preview.
   if (frame.hoverEdges) {
-    count += strokeEdges(ctx, frame.hoverEdges.solid, t.edgeHover, RENDER.edge.hover, false, xf, cull)
-    count += strokeEdges(ctx, frame.hoverEdges.dashed, t.edgeHover, RENDER.edge.hover, true, xf, cull)
+    count += strokeEdges(ctx, frame.hoverEdges.solid, t.edgeHover, RENDER.edge.hover, false, xf, cull, lowZoom)
+    count += strokeEdges(ctx, frame.hoverEdges.dashed, t.edgeHover, RENDER.edge.hover, true, xf, cull, lowZoom)
   }
   ctx.setLineDash([])
   return count
 }
 
-function drawLabelledDots(ctx: CanvasRenderingContext2D, scene: Scene, list: readonly NodeDraw[], xf: Xf, bg: string[]): void {
+function drawLabelledDots(ctx: CanvasRenderingContext2D, scene: Scene, list: readonly NodeDraw[], xf: Xf, bg: string[], rewash: Rewash | null): void {
   if (!list.length) return
   const { geometry, tokens: t } = scene.input
   const z = xf.z
@@ -1014,6 +1030,7 @@ function drawLabelledDots(ctx: CanvasRenderingContext2D, scene: Scene, list: rea
     if (any) {
       ctx.fillStyle = bg[parity]
       ctx.fill(path)
+      rewash?.(path)
     }
   }
   // Filled discs grouped by colour.
@@ -1056,28 +1073,37 @@ function drawLabelledDots(ctx: CanvasRenderingContext2D, scene: Scene, list: rea
     }
   }
   for (const n of records) drawRecordGlyph(ctx, n, pos(n), screenRadius(n.r, z, false), t)
-  // Program and available rings, grouped by colour and width.
-  const rings = new Map<string, Path2D>()
+  // Program and available rings, grouped by colour, width and opacity.
+  strokeRings(ctx, list, null, xf, geometry)
+}
+
+/** Strokes the rings of `list`, one path per colour / width / opacity; `base` fixes the screen radius (minis). */
+function strokeRings(ctx: CanvasRenderingContext2D, list: readonly NodeDraw[], base: number | null, xf: Xf, geometry: Geometry): void {
+  const rings = new Map<string, { ring: Ring; path: Path2D }>()
   for (const n of list) {
     if (!n.rings.length) continue
-    const { x, y } = pos(n)
-    const base = screenRadius(n.r, z, false)
+    const box = geometry.nodes[n.index]
+    const x = X(xf, box.cx)
+    const y = Y(xf, box.cy)
+    const r0 = base ?? screenRadius(n.r, xf.z, false)
     for (const ring of n.rings) {
-      const key = `${ring.color}|${ring.width}`
-      let path = rings.get(key)
-      if (!path) rings.set(key, (path = new Path2D()))
-      const r = base + ringOffset(ring.r - n.r, z)
-      path.moveTo(x + r, y)
-      path.arc(x, y, r, 0, Math.PI * 2)
+      const key = `${ring.color}|${ring.width}|${ring.alpha ?? 1}`
+      let entry = rings.get(key)
+      if (!entry) rings.set(key, (entry = { ring, path: new Path2D() }))
+      const r = r0 + ringOffset(ring.r - n.r, xf.z)
+      entry.path.moveTo(x + r, y)
+      entry.path.arc(x, y, r, 0, Math.PI * 2)
     }
   }
+  if (!rings.size) return
   ctx.setLineDash([])
-  for (const [key, path] of rings) {
-    const [color, width] = key.split('|')
-    ctx.strokeStyle = color
-    ctx.lineWidth = Number(width)
+  for (const { ring, path } of rings.values()) {
+    ctx.globalAlpha = ring.alpha ?? 1
+    ctx.strokeStyle = ring.color
+    ctx.lineWidth = ring.width
     ctx.stroke(path)
   }
+  ctx.globalAlpha = 1
 }
 
 function drawRecordGlyph(ctx: CanvasRenderingContext2D, n: NodeDraw, p: { x: number; y: number }, r: number, t: RenderTokens): void {
@@ -1179,7 +1205,7 @@ function drawLabels(ctx: CanvasRenderingContext2D, scene: Scene, list: readonly 
   return count
 }
 
-function drawFocus(ctx: CanvasRenderingContext2D, scene: Scene, plate: PlateDraw, xf: Xf, bg: string[], frame: FrameState): void {
+function drawFocus(ctx: CanvasRenderingContext2D, scene: Scene, plate: PlateDraw, xf: Xf, bg: string[], frame: FrameState, rewash: Rewash | null): void {
   const { geometry, tokens: t } = scene.input
   const box = geometry.nodes[plate.index]
   const n = scene.nodes[plate.index]
@@ -1190,10 +1216,11 @@ function drawFocus(ctx: CanvasRenderingContext2D, scene: Scene, plate: PlateDraw
   const ringR = screenRadius(R.focusRing, z, false)
   const knock = ringR + ringOffset(R.focusKnockout - R.focusRing, z)
   ctx.setLineDash([])
+  const disc = new Path2D()
+  disc.arc(x, y, knock, 0, Math.PI * 2)
   ctx.fillStyle = bg[n.parity]
-  ctx.beginPath()
-  ctx.arc(x, y, knock, 0, Math.PI * 2)
-  ctx.fill()
+  ctx.fill(disc)
+  rewash?.(disc)
   ctx.save()
   if (t.dark && !t.forced) {
     ctx.shadowBlur = RENDER.glowBlur

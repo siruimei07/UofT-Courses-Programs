@@ -157,7 +157,11 @@ function nearestBy(list: readonly number[], score: (v: number) => number): numbe
   return best
 }
 
-/** Up/Down: the previous/next node of the same track, then the nearest node of the adjacent lane. */
+/**
+ * Up/Down: the previous/next node of the same track, then the nearest node of the adjacent lane.
+ * During a selection the cursor only moves among chain nodes of the same column (11.3): at the
+ * last one it stays put instead of jumping to another column.
+ */
 function vertical(ctx: NavContext, from: number, down: boolean): number {
   const { topology, geometry, candidates } = ctx
   const node = topology.nodes[from]
@@ -168,10 +172,10 @@ function vertical(ctx: NavContext, from: number, down: boolean): number {
       (down ? b.cy > box.cy : b.cy < box.cy)
   })
   if (sameTrack.length) return nearestBy(sameTrack, v => Math.abs(geometry.nodes[v].cy - box.cy) + 0.01 * Math.abs(geometry.nodes[v].cx - box.cx))
-  // Chain nodes of the same column in other lanes come next during a selection.
+  // Chain nodes of the same column in other lanes (or other tracks) come next during a selection.
   if (ctx.focus >= 0) {
     const sameColumn = candidates.filter(v => v !== from && topology.nodes[v].col === node.col && (down ? geometry.nodes[v].cy > box.cy : geometry.nodes[v].cy < box.cy))
-    if (sameColumn.length) return nearestBy(sameColumn, v => Math.abs(geometry.nodes[v].cy - box.cy))
+    return sameColumn.length ? nearestBy(sameColumn, v => Math.abs(geometry.nodes[v].cy - box.cy)) : from
   }
   const lanes = topology.lanes.length
   for (let lane = node.lane + (down ? 1 : -1); lane >= 0 && lane < lanes; lane += down ? 1 : -1) {

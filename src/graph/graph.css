@@ -162,12 +162,14 @@
   background: var(--hover);
 }
 
+/* Separators end on the lane boundary (border-bottom of the lane above); the canvas rules use the
+   same convention (renderer.ts separatorLine), so plot and lane column meet without a step. */
 .gc-lane.is-division-start::before {
   content: "";
   position: absolute;
   left: 0;
   right: 0;
-  top: -1px;
+  top: -1.5px;
   height: 1.5px;
   background: var(--rule-strong);
 }
@@ -280,11 +282,14 @@
   font-weight: 400;
 }
 
+/* Hidden until lane hover or keyboard focus, but always focusable (11.1: ring on the kebab). */
 .gc-lane-kebab {
   position: absolute;
   right: -6px;
   bottom: -3px;
-  display: none;
+  display: grid;
+  opacity: 0;
+  pointer-events: none;
   place-items: center;
   width: 24px;
   height: 24px;
@@ -300,9 +305,10 @@
 }
 
 .gc-lane:hover .gc-lane-kebab,
-.gc-lane-kebab:focus-visible,
+.gc-lane:focus-within .gc-lane-kebab,
 .gc-lane-kebab[aria-expanded="true"] {
-  display: grid;
+  opacity: 1;
+  pointer-events: auto;
 }
 
 .gc-lane-kebab:hover {

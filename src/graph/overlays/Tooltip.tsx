@@ -1,6 +1,8 @@
 // Graph tooltip (design-spec 6.9.4): shown 350 ms after hover rests on a node (or a fork junction),
-// 16 px right of and 14 px below the cursor, flipped to stay inside the graph area.
+// 16 px right of and 14 px below the cursor, flipped to stay inside the graph area. Only official
+// text (codes, titles, requirement text) carries lang="en" (12); UI strings follow <html lang>.
 import { useLayoutEffect, useRef, useState } from 'react'
+import type { ReactNode } from 'react'
 
 const OFFSET_X = 16
 const OFFSET_Y = 14
@@ -20,7 +22,8 @@ export type TooltipContent =
     coreqLabel: string
     coreq: string | null
   }
-  | { kind: 'text'; text: string }
+  /** Fork junction: a localised template ("Any one of: {list}") around official course codes. */
+  | { kind: 'anyOf'; template: string; codes: string }
 
 export interface TooltipState {
   content: TooltipContent
@@ -33,6 +36,11 @@ export interface TooltipProps {
   tip: TooltipState | null
   areaWidth: number
   areaHeight: number
+}
+
+/** Fills `{list}` with the codes, which keep lang="en" inside a translated sentence. */
+export function anyOfParts(template: string, codes: string): ReactNode[] {
+  return template.split(/(\{list\})/).map((part, index) => (part === '{list}' ? <span key={index} lang="en">{codes}</span> : part))
 }
 
 export function Tooltip({ tip, areaWidth, areaHeight }: TooltipProps) {
@@ -63,8 +71,8 @@ export function Tooltip({ tip, areaWidth, areaHeight }: TooltipProps) {
       ref={ref}
       style={{ transform: pos ? `translate(${pos.left}px, ${pos.top}px)` : undefined, visibility: pos ? 'visible' : 'hidden' }}
     >
-      {c.kind === 'text' ? (
-        <div className="gc-tip-text" lang="en">{c.text}</div>
+      {c.kind === 'anyOf' ? (
+        <div className="gc-tip-text">{anyOfParts(c.template, c.codes)}</div>
       ) : (
         <>
           <div className="gc-tip-head">

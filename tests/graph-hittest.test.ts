@@ -117,6 +117,27 @@ describe('keyboard cursor navigation (design-spec 11.3)', () => {
     expect(startCursor(ctx)).toBe(focus)
   })
 
+  it('keeps Up/Down among chain nodes of the same column during a selection', () => {
+    for (const code of ['CSC148H5', 'MAT232H5', 'ECO200Y5']) {
+      const { presentation, geometry } = model(`UTM:${code}`)
+      const ctx = ctxOf(presentation, geometry, idx(code))
+      for (const from of ctx.candidates) {
+        for (const direction of ['up', 'down'] as const) {
+          const to = moveCursor(ctx, from, direction)
+          expect(ctx.candidates).toContain(to)
+          expect(topology.nodes[to].col, `${code}: ${topology.nodes[from].code} ${direction}`).toBe(topology.nodes[from].col)
+        }
+      }
+    }
+    // Review repro: CSC148H5, Right, Right, Down, Down never leaves the column (it used to jump to MAT406H5).
+    const { presentation, geometry } = model('UTM:CSC148H5')
+    const ctx = ctxOf(presentation, geometry, idx('CSC148H5'))
+    let at = moveCursor(ctx, moveCursor(ctx, idx('CSC148H5'), 'right'), 'right')
+    const col = topology.nodes[at].col
+    for (let i = 0; i < 4; i++) at = moveCursor(ctx, at, 'down')
+    expect(topology.nodes[at].col).toBe(col)
+  })
+
   it('jumps to the first and last lanes with Home / End', () => {
     const { presentation, geometry } = model(null)
     const ctx = ctxOf(presentation, geometry, -1)

@@ -18,6 +18,8 @@ export const WINDOW_LEFT_INSET = 24
 /** 10.4: a click below this zoom (labels invisible) zooms to the floor around the node. */
 export const CLICK_MIN_ZOOM = 0.73
 export const NUDGE_MARGIN = 16
+/** 10.3 / 9.4: the 10 px scrollbars plus air; dots this close to the right / bottom edge are hidden. */
+export const SCROLLBAR_CLEARANCE = 16
 
 export interface View {
   zoom: number
@@ -210,7 +212,8 @@ export function frameView(request: FrameRequest, plot: Plot): View {
   }
   const z = FRAME_ZOOM_FLOOR
   for (const window of request.windows ?? []) {
-    if ((window.w + WINDOW_LEFT_INSET) * z > vw) continue
+    // The window's left edge sits 24 screen px inside the plot and needs the 16 px right margin.
+    if (window.w * z + WINDOW_LEFT_INSET > plot.width - FRAME_MARGIN_X) continue
     return { zoom: z, x: window.x - WINDOW_LEFT_INSET / z, y: placeY(window, z, plot, focus) }
   }
   if (focus) return { zoom: z, x: focus.x - plot.width / 2 / z, y: placeY(box, z, plot, focus) }
@@ -243,18 +246,21 @@ export type SideCounts = Record<Side, SideCount>
 
 const emptyCount = (): SideCount => ({ pre: 0, unl: 0, prog: 0, total: 0 })
 
-/** Which side a dot is hidden on (horizontal sides win), or null when it is inside the plot. */
-export function hiddenSide(view: View, plot: Plot, point: Point): Side | null {
+/**
+ * Which side a dot is hidden on (horizontal sides win), or null when it is readable in the plot.
+ * Dots under the scrollbars (within `clearance` of the right or bottom edge) count as hidden.
+ */
+export function hiddenSide(view: View, plot: Plot, point: Point, clearance = SCROLLBAR_CLEARANCE): Side | null {
   const sx = toScreenX(view, plot, point.x)
   const sy = toScreenY(view, plot, point.y)
   if (sx < plot.left) return 'left'
-  if (sx > plot.left + plot.width) return 'right'
+  if (sx > plot.left + plot.width - clearance) return 'right'
   if (sy < plot.top) return 'top'
-  if (sy > plot.top + plot.height) return 'bottom'
+  if (sy > plot.top + plot.height - clearance) return 'bottom'
   return null
 }
 
-/** Chain nodes whose dots are outside the plot, per side; at most one pill per side. */
+/** Chain nodes whose dots are outside the plot (or under a scrollbar), per side; at most one pill per side. */
 export function countHidden(view: View, plot: Plot, targets: readonly PillTarget[]): SideCounts {
   const counts: SideCounts = { left: emptyCount(), right: emptyCount(), top: emptyCount(), bottom: emptyCount() }
   for (const target of targets) {

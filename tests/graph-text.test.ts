@@ -128,6 +128,23 @@ describe('createLabelMeasure (contract LabelMeasure)', () => {
     expect(measure.plate(i, 'screen').metrics.title.size).toBe(11.5)
   })
 
+  it('keeps every screen-plate text at 11.5 px or more (credit included)', () => {
+    const screen = measure.plate(idx('CSC148H5'), 'screen').metrics
+    for (const spec of [screen.code, screen.credit, screen.title]) expect(spec.size).toBeGreaterThanOrEqual(11.5)
+  })
+
+  it('caches widths per injected measureText, never across measurers', () => {
+    const narrow = (text: string, font: string) => fakeMeasure(text, font)
+    const wide = (text: string, font: string) => 2 * fakeMeasure(text, font)
+    const a = createLabelMeasure(topology, dataset, { measureText: narrow, creditLabel: '{n} cr' })
+    const b = createLabelMeasure(topology, dataset, { measureText: wide, creditLabel: '{n} cr' })
+    const i = idx('CSC148H5')
+    // Same font strings and texts: a shared cache would hand b the widths a measured first.
+    expect(a(i, 'compact', false)).toBe(fakeMeasure('CSC148H5', a.font(TEXT.code)))
+    expect(b(i, 'compact', false)).toBe(2 * a(i, 'compact', false))
+    expect(b.plate(i, 'world').codeWidth).toBe(2 * a.plate(i, 'world').codeWidth)
+  })
+
   it('every course measures to a finite, positive width in each class', () => {
     for (const node of topology.nodes) {
       for (const cls of ['compact', 'full'] as const) {
