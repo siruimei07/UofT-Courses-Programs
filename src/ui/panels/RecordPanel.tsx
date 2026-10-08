@@ -1,16 +1,16 @@
 // My courses tab (design-spec 6.7.3): the student record grouped by status with counts and
 // credits, an "Add a course…" search, and JSON import / export / clear. Stored only locally.
-import { memo, useContext, useId, useMemo, useRef, useState, type ChangeEvent, type KeyboardEvent } from 'react'
-import { actions } from '../../app/store'
+import { memo, useContext, useId, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent, type KeyboardEvent } from 'react'
+import { actions, type RecordEntry } from '../../app/store'
 import type { RecordStatus } from '../../graph/types'
 import { format, formatNumber, useLang, useStrings } from '../../i18n'
 import { campusName, RECORD_LABEL, RecordGlyph } from './CourseChip'
 import { PanelContext, usePanelEnv } from './context'
-import { campusOf, creditsText } from './format'
+import { campusOf, coursesText, creditsText, plural } from './format'
 import { PanelEnvProvider } from './parts'
 import {
-  exportRecordJson, groupRecord, importRecordText, MAX_IMPORT_BYTES, RECORD_FILE_NAME, recordTotals, searchCourses, STATUS_ORDER,
-  type ImportError, type RecordRow,
+  exportRecordJson, groupRecord, importRecordText, MAX_IMPORT_BYTES, nextRecordEntry, RECORD_FILE_NAME, recordTotals, searchCourses,
+  STATUS_ORDER, type ImportError, type RecordRow,
 } from './record'
 import { panelStrings, type PanelStrings } from './strings'
 import type { PanelProps } from './types'
@@ -38,11 +38,12 @@ const RecordView = memo(function RecordView() {
         <div className="rp-stats">
           {STATUS_ORDER.map(status => (
             <div key={status} className="rp-stat">
-              <span className="rp-stat-label">
+              {/* The label has its own line and may wrap; the glyph sits with the count. */}
+              <span className="rp-stat-label">{s[RECORD_LABEL[status]]}</span>
+              <span className="rp-stat-value">
                 <RecordGlyph status={status} />
-                {s[RECORD_LABEL[status]]}
+                {formatNumber(totals[status].count, lang)}
               </span>
-              <span className="rp-stat-value">{formatNumber(totals[status].count, lang)}</span>
               <span className="rp-stat-meta">{creditsText(totals[status].credits, lang, s)}</span>
             </div>
           ))}
@@ -142,9 +143,8 @@ function RecordRowView({ row }: { row: RecordRow }) {
   const campus = campusOf(row.id)
   const missingLabel = campus && campus !== dataset.campus ? campusName(campus, s) : s.notInCalendar
   const setStatus = (event: ChangeEvent<HTMLSelectElement>) => {
-    const status = event.target.value as RecordStatus
-    const grade = status === 'completed' ? row.entry.grade : undefined
-    actions.setRecord(row.id, grade === undefined ? { status } : { status, grade })
+    const next = nextRecordEntry(row.entry, event.target.value as RecordStatus)
+    if (next !== 'unchanged') actions.setRecord(row.id, next)
   }
   const statusLabel = format(s.changeStatus, { code: row.code })
   const removeLabel = format(s.remove, { code: row.code })
@@ -182,6 +182,12 @@ function RecordRowView({ row }: { row: RecordRow }) {
 
 type Message = { kind: 'ok'; count: number; file: string } | { kind: 'error'; error: ImportError }
 
+/** A parsed import waiting for "Replace" because the current record is not empty. */
+interface PendingImport {
+  record: Map<string, RecordEntry>
+  file: string
+}
+
 function errorText(error: ImportError, s: PanelStrings): string {
   if ('id' in error) return format(s[error.key], { id: error.id })
   if ('message' in error) return format(s[error.key], { message: error.message })
@@ -204,13 +210,30 @@ function RecordActions({ count }: { count: number }) {
   const lang = useLang()
   const { record } = usePanelEnv()
   const fileRef = useRef<HTMLInputElement>(null)
+  const importRef = useRef<HTMLButtonElement>(null)
+  const clearRef = useRef<HTMLButtonElement>(null)
   const [confirming, setConfirming] = useState(false)
+  const [pending, setPending] = useState<PendingImport | null>(null)
   const [message, setMessage] = useState<Message | null>(null)
+  // After an inline confirmation closes, focus returns to the button that opened it.
+  const restore = useRef<'import' | 'clear' | null>(null)
+  useLayoutEffect(() => {
+    if (confirming || pending || !restore.current) return
+    const target = restore.current === 'import' ? importRef.current : clearRef.current
+    restore.current = null
+    target?.focus()
+  }, [confirming, pending])
+
+  const apply = (next: PendingImport) => {
+    actions.replaceRecord(next.record)
+    setMessage({ kind: 'ok', count: next.record.size, file: next.file })
+  }
 
   const onFile = async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0]
     event.target.value = ''
     if (!file) return
+    setMessage(null)
     if (file.size > MAX_IMPORT_BYTES) return setMessage({ kind: 'error', error: { key: 'importTooLarge' } })
     let text: string
     try {
@@ -220,32 +243,50 @@ function RecordActions({ count }: { count: number }) {
     }
     const result = importRecordText(text)
     if (!result.ok) return setMessage({ kind: 'error', error: result.error })
-    actions.replaceRecord(result.record)
-    setMessage({ kind: 'ok', count: result.record.size, file: file.name })
+    const next = { record: result.record, file: file.name }
+    // Replacing a record the student built is confirmed first; an empty record just loads.
+    if (count > 0) setPending(next)
+    else apply(next)
+  }
+
+  const closePending = (replace: boolean) => {
+    if (replace && pending) apply(pending)
+    restore.current = 'import'
+    setPending(null)
+  }
+  const closeConfirm = (clear: boolean) => {
+    if (clear) {
+      actions.replaceRecord(new Map())
+      setMessage(null)
+    }
+    restore.current = 'clear'
+    setConfirming(false)
   }
 
   const empty = count === 0
   return (
     <div className="rp-actions">
-      {confirming ? (
+      {pending ? (
+        <div className="rp-confirm" role="group" aria-label={s.importJson}>
+          <span>
+            {format(s.importReplace, {
+              current: coursesText(count, lang, s),
+              incoming: coursesText(pending.record.size, lang, s),
+              file: pending.file,
+            })}
+          </span>
+          <button type="button" className="rp-btn" autoFocus onClick={() => closePending(false)}>{s.cancel}</button>
+          <button type="button" className="rp-btn rp-btn-danger" onClick={() => closePending(true)}>{s.replace}</button>
+        </div>
+      ) : confirming ? (
         <div className="rp-confirm" role="group" aria-label={s.clearAll}>
-          <span>{format(s.clearConfirm, { n: formatNumber(count, lang) })}</span>
-          <button type="button" className="rp-btn" autoFocus onClick={() => setConfirming(false)}>{s.cancel}</button>
-          <button
-            type="button"
-            className="rp-btn rp-btn-danger"
-            onClick={() => {
-              actions.replaceRecord(new Map())
-              setConfirming(false)
-              setMessage(null)
-            }}
-          >
-            {s.clear}
-          </button>
+          <span>{format(plural(count, s.clearConfirmOne, s.clearConfirmMany), { n: formatNumber(count, lang) })}</span>
+          <button type="button" className="rp-btn" autoFocus onClick={() => closeConfirm(false)}>{s.cancel}</button>
+          <button type="button" className="rp-btn rp-btn-danger" onClick={() => closeConfirm(true)}>{s.clear}</button>
         </div>
       ) : (
         <div className="rp-action-row">
-          <button type="button" className="rp-btn" onClick={() => fileRef.current?.click()}>{s.importJson}</button>
+          <button ref={importRef} type="button" className="rp-btn" onClick={() => fileRef.current?.click()}>{s.importJson}</button>
           <input ref={fileRef} type="file" accept=".json,application/json" hidden tabIndex={-1} onChange={onFile} />
           <button
             type="button"
@@ -257,6 +298,7 @@ function RecordActions({ count }: { count: number }) {
             {s.exportJson}
           </button>
           <button
+            ref={clearRef}
             type="button"
             className="rp-btn"
             aria-disabled={empty}
@@ -274,7 +316,7 @@ function RecordActions({ count }: { count: number }) {
       {message ? (
         message.kind === 'error'
           ? <p className="rp-danger" role="alert">{errorText(message.error, s)}</p>
-          : <p className="rp-ok" role="status">{format(s.importDone, { n: formatNumber(message.count, lang), file: message.file })}</p>
+          : <p className="rp-ok" role="status">{format(s.importDone, { courses: coursesText(message.count, lang, s), file: message.file })}</p>
       ) : null}
     </div>
   )

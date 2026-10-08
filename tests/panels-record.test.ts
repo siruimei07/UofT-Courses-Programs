@@ -1,8 +1,11 @@
 import { describe, expect, it } from 'vitest'
 import type { RecordEntry } from '../src/app/store'
 import type { GraphCourse } from '../src/data/schema'
+import type { CourseEngine } from '../src/domain/engine-types'
+import type { Eligibility } from '../src/graph/types'
 import {
-  earnsCredit, exportRecordJson, groupCredits, groupRecord, importRecordText, mapImportError, recordTotals, searchCourses,
+  cachedEligibility, earnsCredit, exportRecordJson, gradedEntry, gradeText, groupCredits, groupRecord, importRecordText, mapImportError,
+  nextRecordEntry, recordTotals, searchCourses, syncGradeDraft,
 } from '../src/ui/panels/record'
 
 const course = (code: string, title: string, credits = 0.5): GraphCourse => ({
@@ -115,5 +118,65 @@ describe('add-a-course search', () => {
   it('returns nothing for an empty query and respects the limit', () => {
     expect(codes('  ')).toEqual([])
     expect(searchCourses(catalog, 'c', 2)).toHaveLength(2)
+  })
+})
+
+describe('record control (stale grade regression)', () => {
+  it('writes only from the stored entry, so an old draft grade never comes back', () => {
+    // Completed 80, then Clear all, then Completed again: no grade.
+    expect(nextRecordEntry(undefined, 'completed')).toEqual({ status: 'completed' })
+    // A grade survives a move to Completed only when it is stored on the entry (imported files).
+    expect(nextRecordEntry({ status: 'inProgress', grade: 65 }, 'completed')).toEqual({ status: 'completed', grade: 65 })
+    expect(nextRecordEntry({ status: 'completed', grade: 80 }, 'planned')).toEqual({ status: 'planned' })
+    expect(nextRecordEntry({ status: 'completed', grade: 80 }, 'none')).toBeNull()
+  })
+
+  it('does nothing when the status is already stored', () => {
+    expect(nextRecordEntry({ status: 'completed', grade: 80 }, 'completed')).toBe('unchanged')
+    expect(nextRecordEntry({ status: 'planned' }, 'planned')).toBe('unchanged')
+    expect(nextRecordEntry(undefined, 'none')).toBe('unchanged')
+  })
+
+  it('writes a grade edit only when it is valid and different', () => {
+    const entry: RecordEntry = { status: 'completed', grade: 80 }
+    expect(gradedEntry(entry, '65')).toEqual({ status: 'completed', grade: 65 })
+    expect(gradedEntry(entry, '')).toEqual({ status: 'completed' })
+    expect(gradedEntry(entry, '80')).toBe('unchanged')
+    expect(gradedEntry(entry, '080')).toBe('unchanged')
+    expect(gradedEntry(entry, '8a')).toBe('unchanged')
+    expect(gradedEntry({ status: 'completed' }, '  ')).toBe('unchanged')
+  })
+
+  it('re-syncs the grade input from the stored grade', () => {
+    expect(gradeText(undefined)).toBe('')
+    expect(gradeText(77.5)).toBe('77.5')
+    // Clear all while the input still says 80.
+    expect(syncGradeDraft('80', undefined)).toBe('')
+    // An import replaced 80 with 65.
+    expect(syncGradeDraft('80', 65)).toBe('65')
+    // An invalid draft gives way to the stored grade.
+    expect(syncGradeDraft('8a', 65)).toBe('65')
+    // What the student is typing stays while it means the stored grade.
+    expect(syncGradeDraft('080', 80)).toBe('080')
+    expect(syncGradeDraft('8', 8)).toBe('8')
+    expect(syncGradeDraft('', undefined)).toBe('')
+  })
+})
+
+describe('eligibility cache', () => {
+  it('computes eligibility once per engine and record', () => {
+    let calls = 0
+    const engine = {
+      eligibility: () => {
+        calls++
+        return new Map<string, Eligibility>([['UTM:CSC148H5', 'met']])
+      },
+    } as unknown as CourseEngine
+    const record = new Map<string, RecordEntry>([['UTM:CSC108H5', { status: 'completed' }]])
+    const first = cachedEligibility(engine, record)
+    expect(cachedEligibility(engine, record)).toBe(first)
+    expect(calls).toBe(1)
+    cachedEligibility(engine, new Map(record))
+    expect(calls).toBe(2)
   })
 })

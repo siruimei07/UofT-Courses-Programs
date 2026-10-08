@@ -12,7 +12,7 @@ export interface PanelEnv {
   record: ReadonlyMap<string, RecordEntry>
   /** Eligibility of courses not taken yet; null while the record is empty. */
   eligibility: ReadonlyMap<string, Eligibility> | null
-  /** Selects a course and asks the graph to bring it into view. */
+  /** Selects a course; the shell frames it on the map (non-canvas selections), the host moves focus to its title. */
   pick(courseId: string): void
 }
 

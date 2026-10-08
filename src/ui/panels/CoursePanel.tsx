@@ -1,20 +1,21 @@
 // Course tab (design-spec 6.7.1): header with record control, chain summary (the screen-reader
 // chain list of section 12), official requirement text with evaluated trees, and description.
 import { memo, useContext, useId, useMemo, useState, type ReactNode } from 'react'
+import { classifyRequirements, type CoreqReadout, type NeedsReadout } from '../../app/readout'
 import { actions, useApp, type RecordEntry } from '../../app/store'
 import type { GraphCourse, RequirementLite } from '../../data/schema'
 import { loadDetails } from '../../data/load'
 import type { CourseEngine, CourseEvaluation, EvalNode } from '../../domain/engine-types'
-import type { RecordStatus } from '../../graph/types'
 import { format, formatNumber, useLang, useStrings } from '../../i18n'
 import { CourseChip, ChipList } from './CourseChip'
 import { PanelContext, useCampusData, usePanelEnv } from './context'
-import { capList, codeOf, coursePageUrl, creditsText, levelText, parseGrade, pushRecent } from './format'
-import { Disclosure, ExternalLink, LoadError, OfficialText, PanelEnvProvider, Readout, Segmented, Skeleton, SourceFooter } from './parts'
+import { capList, codeOf, coursePageUrl, creditsText, levelText, parseGrade, plural, pushRecent } from './format'
+import { Disclosure, ExternalLink, LoadError, OfficialText, PanelEnvProvider, Readout, Segmented, Skeleton, SourceFooter, Template } from './parts'
+import { gradedEntry, gradeText, nextRecordEntry, syncGradeDraft, type RecordChoice } from './record'
 import { RuleTree } from './RuleTree'
 import { panelStrings, type PanelStrings } from './strings'
 import {
-  chainOf, isUnparsed, mentionsOf, needsReadout, relationsOf, ruleAsEval, unlocksReadout, unresolvedOf,
+  chainOf, exclusionNote, isUnparsed, mentionsOf, relationsOf, ruleAsEval, unlocksReadout, unresolvedOf,
   type Chain, type Mention, type Relation,
 } from './summary'
 import type { PanelProps } from './types'
@@ -66,7 +67,7 @@ function CourseEmpty({ recent }: { recent: readonly string[] }) {
   )
 }
 
-const EMPTY_CHAIN: Chain = { focus: -1, directPreds: [], earlierPreds: [], directSuccs: [], laterSuccs: [] }
+const EMPTY_CHAIN: Chain = { focus: -1, directPreds: [], directCoreqs: [], earlierPreds: [], directSuccs: [], laterSuccs: [] }
 
 function evaluate(engine: CourseEngine, courseId: string, record: ReadonlyMap<string, RecordEntry>): CourseEvaluation | null {
   try {
@@ -95,7 +96,6 @@ function CourseDetails({ course, engine, onCenter }: ViewProps & { course: Graph
     [course, topology, focus],
   )
   const unresolved = useMemo(() => unresolvedOf(course, id => courses.has(id)), [course, courses])
-  const blockedBy = evaluation?.exclusions?.status === 'blocked' ? evaluation.exclusions.blockedBy : []
 
   return (
     <article className="rp-course" aria-label={`${course.code} ${course.title}`}>
@@ -137,11 +137,7 @@ function CourseDetails({ course, engine, onCenter }: ViewProps & { course: Graph
           <h3 className="rp-sec-title">{s.exclusions}</h3>
           <OfficialText text={course.exclusion.text} />
           <ReferencedChips field={course.exclusion} relationOf={relationOf} />
-          {blockedBy.length ? (
-            <p className="rp-danger" role="note">
-              {format(s.excludedByRecord, { codes: blockedBy.map(codeOf).join(', ') })}
-            </p>
-          ) : null}
+          <ExclusionNote evaluation={evaluation} />
         </section>
       ) : null}
 
@@ -167,6 +163,17 @@ function CourseDetails({ course, engine, onCenter }: ViewProps & { course: Graph
   )
 }
 
+/** Red when a parsed exclusion matches the record; a soft "May exclude" note for a possible match. */
+function ExclusionNote({ evaluation }: { evaluation: CourseEvaluation | null }) {
+  const s = useStrings(panelStrings)
+  const note = exclusionNote(evaluation?.exclusions)
+  if (!note) return null
+  const codes = note.ids.map(codeOf).join(s.listSep)
+  return note.tone === 'blocked'
+    ? <p className="rp-danger" role="note">{format(s.excludedByRecord, { codes })}</p>
+    : <p className="rp-info" role="note">{format(s.mayExclude, { codes })}</p>
+}
+
 function CourseHeader({ course, onCenter }: { course: GraphCourse; onCenter(courseId: string): void }) {
   const s = useStrings(panelStrings)
   const lang = useLang()
@@ -174,16 +181,17 @@ function CourseHeader({ course, onCenter }: { course: GraphCourse; onCenter(cour
   // Distribution and delivery place are official wording; only the labels around them translate.
   const meta: ReactNode[] = [creditsText(course.credits, lang, s), format(s.level, { n: levelText(course.level) })]
   if (course.distribution) meta.push(<span lang="en">{course.distribution}</span>)
-  if (course.deliveryCampus) meta.push(format(s.deliveredAt, { place: course.deliveryCampus }))
+  if (course.deliveryCampus) meta.push(<Template template={s.deliveredAt} slots={{ place: <span lang="en">{course.deliveryCampus}</span> }} />)
   return (
     <header className="rp-head">
       <div className="rp-plate-row">
         <span className="rp-plate" lang="en">{course.code}</span>
         <span className="rp-meta rp-num-tab">
-          {meta.map((part, i) => <span key={i}>{i ? ' · ' : ''}{part}</span>)}
+          {meta.map((part, i) => <span key={i}>{i ? s.metaSep : ''}{part}</span>)}
         </span>
       </div>
-      <h2 className="rp-title" lang="en">{course.title}</h2>
+      {/* Focus target after a chip pick (the tab remounts for the new course). */}
+      <h2 className="rp-title" lang="en" tabIndex={-1}>{course.title}</h2>
       <RecordControl course={course} />
       <div className="rp-links">
         <ExternalLink href={coursePageUrl(dataset.sources.coursePageTemplate, course.code)}>{s.officialPage}</ExternalLink>
@@ -193,13 +201,22 @@ function CourseHeader({ course, onCenter }: { course: GraphCourse; onCenter(cour
   )
 }
 
-type RecordChoice = RecordStatus | 'none'
+function write(courseId: string, next: RecordEntry | null | 'unchanged'): void {
+  if (next !== 'unchanged') actions.setRecord(courseId, next)
+}
 
 function RecordControl({ course }: { course: GraphCourse }) {
   const s = useStrings(panelStrings)
   const { record } = usePanelEnv()
   const entry = record.get(course.id)
-  const [draft, setDraft] = useState(entry?.grade === undefined ? '' : String(entry.grade))
+  const stored = entry?.grade
+  const [draft, setDraft] = useState(() => gradeText(stored))
+  // Re-sync the input whenever the stored grade changes (typing, import, clear all, My courses).
+  const [synced, setSynced] = useState(stored)
+  if (stored !== synced) {
+    setSynced(stored)
+    setDraft(syncGradeDraft(draft, stored))
+  }
   const parsed = parseGrade(draft)
   const options: { value: RecordChoice; label: string }[] = [
     { value: 'none', label: s.notTaken },
@@ -207,16 +224,9 @@ function RecordControl({ course }: { course: GraphCourse }) {
     { value: 'inProgress', label: s.inProgress },
     { value: 'completed', label: s.completed },
   ]
-  const choose = (value: RecordChoice) => {
-    if (value === 'none') return actions.setRecord(course.id, null)
-    const grade = value === 'completed' && typeof parsed === 'number' ? parsed : undefined
-    actions.setRecord(course.id, grade === undefined ? { status: value } : { status: value, grade })
-  }
   const onGrade = (text: string) => {
     setDraft(text)
-    const grade = parseGrade(text)
-    if (grade === 'invalid') return
-    actions.setRecord(course.id, grade === null ? { status: 'completed' } : { status: 'completed', grade })
+    write(course.id, gradedEntry(entry, text))
   }
   const gradeId = `rp-grade-${course.code}`
   return (
@@ -225,7 +235,7 @@ function RecordControl({ course }: { course: GraphCourse }) {
         className="rp-seg-full"
         options={options}
         value={entry?.status ?? 'none'}
-        onChange={choose}
+        onChange={choice => write(course.id, nextRecordEntry(entry, choice))}
         label={format(s.recordControl, { code: course.code })}
       />
       {entry?.status === 'completed' ? (
@@ -251,6 +261,29 @@ function RecordControl({ course }: { course: GraphCourse }) {
   )
 }
 
+function needsSummary(needs: NeedsReadout, s: PanelStrings, n: (value: number) => string): ReactNode {
+  switch (needs.kind) {
+    case 'none': return <span>{s.readoutNoneListed}</span>
+    case 'offMap': return <span>{s.readoutNoCourses}</span>
+    case 'oneOf': return <Readout template={s.readoutNeedsOneOf} values={{ n: n(needs.of), t: n(needs.total) }} />
+    case 'plain': return <Readout template={s.readoutNeeds} values={{ d: n(needs.direct), t: n(needs.total) }} />
+    case 'alternatives': return <Readout template={s.readoutNeedsSome} values={{ d: n(needs.direct), t: n(needs.total) }} />
+    case 'unknown': return <Readout template={plural(needs.direct, s.readoutUnknownOne, s.readoutUnknown)} values={{ d: n(needs.direct), t: n(needs.total) }} />
+  }
+}
+
+function coreqSummary(coreqs: CoreqReadout, s: PanelStrings, n: (value: number) => string): ReactNode {
+  switch (coreqs.kind) {
+    case 'none': return null
+    case 'plain': return <Readout template={plural(coreqs.count, s.coreqOne, s.coreqMany)} values={{ n: n(coreqs.count) }} />
+    case 'oneOf': return <Readout template={s.coreqOneOf} values={{ n: n(coreqs.of) }} />
+    case 'alternatives': return <Readout template={s.coreqAlternatives} values={{ n: n(coreqs.count) }} />
+    case 'unknown': return <Readout template={plural(coreqs.count, s.coreqUnknownOne, s.coreqUnknownMany)} values={{ n: n(coreqs.count) }} />
+  }
+}
+
+const NO_NEEDS: NeedsReadout = { kind: 'none' }
+
 function ChainSummary({ course, chain }: { course: GraphCourse; chain: Chain }) {
   const s = useStrings(panelStrings)
   const lang = useLang()
@@ -258,14 +291,21 @@ function ChainSummary({ course, chain }: { course: GraphCourse; chain: Chain }) 
   const [needsOpen, setNeedsOpen] = useState(true)
   const [unlocksOpen, setUnlocksOpen] = useState(true)
   const n = (value: number) => formatNumber(value, lang)
-  const needs = needsReadout(course.prereq, chain, topology.indexById)
+  // Same classifier as the card head (src/app/readout.ts), so both always say the same thing.
+  const requirements = useMemo(
+    () => (chain.focus < 0 ? null : classifyRequirements(course, topology, chain.focus)),
+    [course, topology, chain.focus],
+  )
   const unlocks = unlocksReadout(chain)
   const idsOf = (indices: readonly number[]) => indices.map(v => topology.nodes[v].id)
 
-  const needsText = needs.kind === 'none' ? <span>{s.readoutNoneListed}</span>
-    : needs.kind === 'noCourses' ? <span>{s.readoutNoCourses}</span>
-    : needs.kind === 'oneOf' ? <Readout template={s.readoutNeedsOneOf} values={{ n: n(needs.options), t: n(needs.total) }} />
-    : <Readout template={needs.kind === 'plain' ? s.readoutNeeds : needs.kind === 'unknown' ? s.readoutUnknown : s.readoutNeedsSome} values={{ d: n(needs.direct), t: n(needs.total) }} />
+  const coreqText = requirements ? coreqSummary(requirements.coreqs, s, n) : null
+  const needsText = (
+    <>
+      {needsSummary(requirements?.needs ?? NO_NEEDS, s, n)}
+      {coreqText ? <> {coreqText}</> : null}
+    </>
+  )
   const unlocksText = unlocks.kind === 'none' ? <span>{s.readoutUnlocksNone}</span>
     : <Readout template={s.readoutUnlocks} values={{ d: n(unlocks.direct), t: n(unlocks.total) }} />
 
@@ -278,8 +318,11 @@ function ChainSummary({ course, chain }: { course: GraphCourse; chain: Chain }) 
         summary={needsText}
         label={format(s.needsList, { code: course.code })}
         lists={[
-          { label: s.neededDirectly, ids: idsOf(chain.directPreds), relation: 'prereq-direct' },
-          { label: s.neededEarlier, ids: idsOf(chain.earlierPreds), relation: 'prereq' },
+          // An unparsed rule (7.4): the courses are listed in its text, not known to be required
+          // (CSC207H5 lists "CSC111H5 or CSC148H5").
+          { key: 'direct', label: requirements?.needs.kind === 'unknown' ? s.listedDirectly : s.neededDirectly, ids: idsOf(chain.directPreds), relation: 'prereq-direct' },
+          { key: 'coreq', label: s.takeTogether, ids: idsOf(chain.directCoreqs), relation: 'prereq-direct' },
+          { key: 'earlier', label: s.neededEarlier, ids: idsOf(chain.earlierPreds), relation: 'prereq' },
         ]}
       />
       <ChainRow
@@ -289,8 +332,8 @@ function ChainSummary({ course, chain }: { course: GraphCourse; chain: Chain }) 
         summary={unlocksText}
         label={format(s.unlocksList, { code: course.code })}
         lists={[
-          { label: s.unlocksDirectly, ids: idsOf(chain.directSuccs), relation: 'unlock-direct' },
-          { label: s.unlocksLater, ids: idsOf(chain.laterSuccs), relation: 'unlock' },
+          { key: 'direct', label: s.unlocksDirectly, ids: idsOf(chain.directSuccs), relation: 'unlock-direct' },
+          { key: 'later', label: s.unlocksLater, ids: idsOf(chain.laterSuccs), relation: 'unlock' },
         ]}
       />
     </section>
@@ -298,6 +341,7 @@ function ChainSummary({ course, chain }: { course: GraphCourse; chain: Chain }) 
 }
 
 interface ChainList {
+  key: string
   label: string
   ids: string[]
   relation: Relation
@@ -322,7 +366,7 @@ function ChainRow({ tone, open, onToggle, summary, label, lists }: {
   return (
     <Disclosure className="rp-chain-row" open={open} onToggle={onToggle} summary={line}>
       <div role="group" aria-label={label} className="rp-chain-lists">
-        {filled.map(list => <ChainGroup key={list.relation} list={list} />)}
+        {filled.map(list => <ChainGroup key={list.key} list={list} />)}
       </div>
     </Disclosure>
   )
@@ -336,9 +380,9 @@ function ChainGroup({ list }: { list: ChainList }) {
   const headingId = useId()
   return (
     <div role="group" aria-labelledby={headingId} className="rp-chain-group">
-      <h4 id={headingId} className="rp-sublabel">
+      <h3 id={headingId} className="rp-sublabel">
         {list.label} <span className="rp-count">{formatNumber(list.ids.length, lang)}</span>
-      </h4>
+      </h3>
       <ul className="rp-chips">
         {shown.map(id => (
           <li key={id}>

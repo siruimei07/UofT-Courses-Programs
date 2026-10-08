@@ -4,9 +4,11 @@
 // fallback of the map (section 12).
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent, type ReactNode } from 'react'
 import { actions, useApp, type PanelId } from '../../app/store'
+import { loadPrograms } from '../../data/load'
 import { format, formatNumber, useLang, useStrings } from '../../i18n'
+import { useCampusData } from './context'
 import { CoursePanel } from './CoursePanel'
-import { codeOf } from './format'
+import { codeOf, programCode, programDisplayTitle } from './format'
 import { PanelEnvProvider } from './parts'
 import { ProgramPanel } from './ProgramPanel'
 import { RecordPanel } from './RecordPanel'
@@ -47,13 +49,30 @@ export function RightPanel(outer: PanelProps) {
   const tabRefs = useRef<Partial<Record<Tab, HTMLButtonElement | null>>>({})
   const railRefs = useRef<Partial<Record<Tab, HTMLButtonElement | null>>>({})
   const bodyRefs = useRef<Partial<Record<Tab, HTMLDivElement | null>>>({})
-  const pendingFocus = useRef<'tab' | 'rail' | null>(null)
+  const pendingFocus = useRef<'tab' | 'rail' | 'title' | null>(null)
+  const wasCollapsed = useRef(collapsed)
+  const current = useRef({ tab, focusId })
+  useLayoutEffect(() => { current.current = { tab, focusId } })
 
   useLayoutEffect(() => {
-    const target = pendingFocus.current === 'tab' ? tabRefs.current[tab] : pendingFocus.current === 'rail' ? railRefs.current[tab] : null
+    const expanded = wasCollapsed.current && !collapsed
+    wasCollapsed.current = collapsed
+    const pending = pendingFocus.current
     pendingFocus.current = null
+    let target: HTMLElement | null | undefined = null
+    if (pending === 'tab') target = tabRefs.current[tab]
+    else if (pending === 'rail') target = railRefs.current[tab]
+    // A chip pick remounts the Course tab for the new course: continue from its title.
+    else if (pending === 'title') target = bodyRefs.current.course?.querySelector<HTMLElement>('.rp-title')
+    // Expanded from outside (Details, shortcut) and the control that had focus is gone.
+    else if (expanded && (!document.activeElement || document.activeElement === document.body)) target = tabRefs.current[tab]
     target?.focus()
-  }, [collapsed, tab])
+  }, [collapsed, tab, focusId])
+
+  // Called before a chip selects a course; nothing moves when that course is already shown.
+  const onPick = useCallback((courseId: string) => {
+    if (courseId !== current.current.focusId || current.current.tab !== 'course') pendingFocus.current = 'title'
+  }, [])
 
   // A new course or program starts at the top of its tab.
   useEffect(() => { bodyRefs.current.course?.scrollTo({ top: 0 }) }, [focusId])
@@ -81,11 +100,17 @@ export function RightPanel(outer: PanelProps) {
     tabRefs.current[TABS[next]]?.focus()
   }
 
+  // Program data is cached per campus; the rail names the program by its POSt code, or by its
+  // title when the calendar gives no code (the id then holds only the page slug).
+  const programs = useCampusData(props.campus, loadPrograms, programId !== null)
+  const program = programId && programs.status === 'ready' ? programs.data.programs.find(item => item.id === programId) : undefined
+  const programDetail = program ? programCode(program) ?? programDisplayTitle(program.title, program.code) : null
+
   const tabLabel = (t: Tab) => t === 'course' ? s.tabCourse : t === 'program' ? s.tabProgram
     : recordSize ? format(s.tabRecordCount, { n: formatNumber(recordSize, lang) }) : s.tabRecord
   const activeDetail: Record<Tab, string | null> = {
     course: focusId ? codeOf(focusId) : null,
-    program: programId ? codeOf(programId) : null,
+    program: programDetail,
     record: recordSize ? formatNumber(recordSize, lang) : null,
   }
   const panels: Record<Tab, ReactNode> = {
@@ -95,10 +120,10 @@ export function RightPanel(outer: PanelProps) {
   }
 
   return (
-    <PanelEnvProvider props={props}>
+    <PanelEnvProvider props={props} onPick={onPick}>
       <aside className="rp" data-collapsed={collapsed} aria-label={s.panelLabel}>
         {collapsed ? (
-          <nav className="rp-rail" aria-label={s.panelLabel}>
+          <nav className="rp-rail" aria-label={s.railLabel}>
             {TABS.map(t => {
               const label = s[RAIL_LABEL[t]]
               const detail = activeDetail[t]
@@ -122,7 +147,7 @@ export function RightPanel(outer: PanelProps) {
         ) : null}
         <div className="rp-card" hidden={collapsed}>
           <div className="rp-tabs">
-            <div className="rp-tablist" role="tablist" aria-label={s.panelLabel}>
+            <div className="rp-tablist" role="tablist" aria-label={s.tabsLabel}>
               {TABS.map((t, i) => (
                 <button
                   key={t}

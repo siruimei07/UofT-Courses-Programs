@@ -1,7 +1,7 @@
 // Pure formatting helpers shared by the panels (no React, no DOM).
 import type { GraphCourse, GraphDataset } from '../../data/schema'
 import type { Lang } from '../../app/store'
-import { format } from '../../i18n'
+import { format, formatNumber } from '../../i18n'
 import type { PanelStrings } from './strings'
 
 /** `UTM:CSC148H5` → `CSC148H5` (ids without a campus are returned as-is). */
@@ -32,9 +32,20 @@ export function formatCredits(value: number, lang: Lang): string {
   return new Intl.NumberFormat(lang === 'zh' ? 'zh-CN' : 'en-CA', { minimumFractionDigits: 1, maximumFractionDigits: 2 }).format(value)
 }
 
-/** "0.5 credit", "1.0 credit", "2.5 credits" (UofT wording: one credit or less is singular). */
+/** "0 credits", "0.5 credit", "1.0 credit", "2.5 credits" (UofT wording: a fraction up to one credit is singular). */
 export function creditsText(value: number, lang: Lang, s: PanelStrings): string {
+  if (value === 0) return format(s.creditMany, { n: formatNumber(0, lang) })
   return format(value <= 1 ? s.creditOne : s.creditMany, { n: formatCredits(value, lang) })
+}
+
+/** Singular template for exactly one, plural otherwise (0 courses, 1 course, 2 courses). */
+export function plural(n: number, one: string, many: string): string {
+  return n === 1 ? one : many
+}
+
+/** "1 course", "0 courses", "12 courses". */
+export function coursesText(n: number, lang: Lang, s: PanelStrings): string {
+  return format(plural(n, s.courseCountOne, s.courseCountMany), { n: formatNumber(n, lang) })
 }
 
 /** 0 → "000", 100 → "100". */
@@ -45,6 +56,11 @@ export function levelText(level: number): string {
 /** "2026-2027" → "2026–2027". */
 export function academicYearText(year: string): string {
   return year.replace(/^(\d{4})-(\d{4})$/, '$1–$2')
+}
+
+/** The program's POSt code, or null when the calendar gives none and `code` is only the page slug. */
+export function programCode(program: { code: string; codeSource?: 'url-slug' }): string | null {
+  return program.codeSource === 'url-slug' ? null : program.code
 }
 
 /** Program titles end in " - ERMAJ1688"; the panels show the code separately. */
@@ -102,8 +118,8 @@ export function capList<T>(items: readonly T[], limit: number, expanded: boolean
   return { shown: items.slice(0, limit), rest: items.length - limit }
 }
 
-/** "A, B +3 more" style list of codes for one-line reasons. */
+/** "A, B +3 more" style list of codes for one-line reasons ("A、B 及另外 3 门" in Chinese). */
 export function codeList(ids: readonly string[], max: number, s: PanelStrings): string {
-  const codes = ids.slice(0, max).map(codeOf).join(', ')
-  return ids.length > max ? `${codes} ${format(s.moreCodes, { n: ids.length - max })}` : codes
+  const codes = ids.slice(0, max).map(codeOf).join(s.listSep)
+  return ids.length > max ? format(s.codesMore, { codes, n: ids.length - max }) : codes
 }

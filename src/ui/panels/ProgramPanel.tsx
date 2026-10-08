@@ -1,6 +1,6 @@
 // Program tab (design-spec 6.7.2): a searchable picker when no program is selected; otherwise the
 // program's progress, "Take next" suggestions and its admission and completion groups.
-import { memo, useContext, useId, useMemo, useState } from 'react'
+import { memo, useContext, useId, useMemo, useRef, useState } from 'react'
 import { actions, useApp, type RecordEntry } from '../../app/store'
 import type { ProgramGroupLite, ProgramLite } from '../../data/schema'
 import { loadPrograms } from '../../data/load'
@@ -9,11 +9,14 @@ import type { Eligibility } from '../../graph/types'
 import { format, formatNumber, useLang, useStrings } from '../../i18n'
 import { ChipList, CourseChip, StatusSvg } from './CourseChip'
 import { PanelContext, useCampusData, usePanelEnv } from './context'
-import { academicYearText, capList, codeList, programDisplayTitle } from './format'
-import { Disclosure, ExternalLink, LoadError, OfficialText, PanelEnvProvider, Readout, Skeleton, SourceFooter } from './parts'
-import { categories, filterPrograms, needsClamp, programTypeChips, programTypeOf, tally, type CategorySummary, type ProgramTypeFilter } from './programs'
+import { academicYearText, plural, programCode, programDisplayTitle } from './format'
+import { Disclosure, ExternalLink, LoadError, OfficialText, PanelEnvProvider, Readout, Skeleton, SourceFooter, useOverflow } from './parts'
+import {
+  capSections, categories, filterPrograms, groupNumber, groupSections, programTypeChips, programTypeOf, tally, type CategorySummary,
+  type ProgramTypeFilter,
+} from './programs'
 import { panelStrings, type PanelStrings } from './strings'
-import { missingCourses, type Relation } from './summary'
+import { nextReason, type Relation } from './summary'
 import type { PanelProps } from './types'
 
 const NEXT_LIMIT = 5
@@ -123,16 +126,20 @@ function ProgramPicker({ programs, query, onQuery, type, onType }: {
       </div>
       {filtered.length ? (
         <ul className="rp-rows">
-          {filtered.map(program => (
-            <li key={program.id}>
-              <button type="button" className="rp-row" onClick={() => actions.selectProgram(program.id)}>
-                <span className="rp-row-title" lang="en">{programDisplayTitle(program.title, program.code)}</span>
-                <span className="rp-row-meta">
-                  {typeLabel(program.type, s)} · <span lang="en">{program.code}</span>
-                </span>
-              </button>
-            </li>
-          ))}
+          {filtered.map(program => {
+            const code = programCode(program)
+            return (
+              <li key={program.id}>
+                <button type="button" className="rp-row" onClick={() => actions.selectProgram(program.id)}>
+                  <span className="rp-row-title" lang="en">{programDisplayTitle(program.title, program.code)}</span>
+                  <span className="rp-row-meta">
+                    {typeLabel(program.type, s)}
+                    {code ? <>{s.metaSep}<span lang="en">{code}</span></> : null}
+                  </span>
+                </button>
+              </li>
+            )
+          })}
         </ul>
       ) : (
         <p className="rp-pad rp-muted">{format(s.programsEmpty, { q: query.trim() })}</p>
@@ -163,6 +170,8 @@ function ProgramDetails({ program, engine }: { program: ProgramLite; engine: Cou
   const statusOf = useMemo(() => new Map(progress?.groups.map(group => [group.groupId, group.status]) ?? []), [progress])
   const percent = overall.total ? Math.round((overall.done / overall.total) * 100) : 0
   const n = (value: number) => formatNumber(value, lang)
+  const progressTemplate = plural(overall.total, s.progressOne, s.progressMany)
+  const code = programCode(program)
   const [officialOpen, setOfficialOpen] = useState(false)
   const official = [
     { label: s.description, text: program.description },
@@ -176,7 +185,7 @@ function ProgramDetails({ program, engine }: { program: ProgramLite; engine: Cou
       <header className="rp-head">
         <div className="rp-plate-row">
           <span className="rp-type-chip">{typeLabel(program.type, s)}</span>
-          <span className="rp-meta" lang="en">{program.code}</span>
+          {code ? <span className="rp-meta" lang="en">{code}</span> : null}
         </div>
         <h2 className="rp-title" lang="en">{programDisplayTitle(program.title, program.code)}</h2>
         <div className="rp-links">
@@ -187,18 +196,20 @@ function ProgramDetails({ program, engine }: { program: ProgramLite; engine: Cou
 
       <section className="rp-sec rp-progress">
         <p className="rp-progress-label">
-          <Readout template={s.progress} values={{ done: n(overall.done), total: n(overall.total) }} />
+          <Readout template={progressTemplate} values={{ done: n(overall.done), total: n(overall.total) }} />
         </p>
         <div
           className="rp-bar"
           role="progressbar"
-          aria-label={format(s.progress, { done: n(overall.done), total: n(overall.total) })}
+          aria-label={format(progressTemplate, { done: n(overall.done), total: n(overall.total) })}
           aria-valuemin={0}
           aria-valuemax={overall.total}
           aria-valuenow={overall.done}
         >
           <span style={{ width: `${percent}%` }} />
         </div>
+        {/* The count includes every alternative and every pathway, so it is never a target. */}
+        <p className="rp-muted rp-progress-note">{s.progressNote}</p>
       </section>
 
       <section className="rp-sec">
@@ -235,11 +246,8 @@ function NextRow({ item, engine, record }: { item: NextCourse; engine: CourseEng
   const s = useStrings(panelStrings)
   const { courses } = usePanelEnv()
   const reason = useMemo(() => {
-    if (item.reason === 'ready') return s.reasonReady
-    if (item.reason === 'check-requirements') return s.reasonCheck
-    const missing = missingCourses(attempt(() => engine.evaluateCourse(item.courseId, record))?.prerequisites ?? null)
-    if (!missing.ids.length) return s.reasonNeedsSome
-    return format(missing.oneOf ? s.reasonNeedsOneOf : s.reasonNeeds, { codes: codeList(missing.ids, 2, s) })
+    const unmet = item.reason === 'needs-prerequisites' || item.reason === 'needs-corequisites'
+    return nextReason(item.reason, unmet ? attempt(() => engine.evaluateCourse(item.courseId, record)) : null, s)
   }, [item, engine, record, s])
   return (
     <li className="rp-next-row">
@@ -254,7 +262,9 @@ function Category({ section, statusOf }: { section: CategorySummary; statusOf: R
   const s = useStrings(panelStrings)
   const lang = useLang()
   const [expanded, setExpanded] = useState(false)
-  const { shown, rest } = capList(section.groups, GROUP_LIMIT, expanded)
+  const sections = useMemo(() => groupSections(section.groups), [section.groups])
+  const { shown, rest } = capSections(sections, GROUP_LIMIT, expanded)
+  const cards = sections.reduce((sum, block) => sum + block.items.length, 0)
   const headingId = useId()
   const n = (value: number) => formatNumber(value, lang)
   return (
@@ -263,16 +273,28 @@ function Category({ section, statusOf }: { section: CategorySummary; statusOf: R
         <span>{section.category === 'admission' ? s.admission : s.completion}</span>
         <span className="rp-sec-meta">
           {section.tally.total
-            ? <Readout template={s.categoryProgress} values={{ done: n(section.tally.done), total: n(section.tally.total) }} />
+            ? (
+              <Readout
+                template={plural(section.tally.total, s.categoryProgressOne, s.categoryProgressMany)}
+                values={{ done: n(section.tally.done), total: n(section.tally.total) }}
+              />
+            )
             : s.categoryNoCourses}
         </span>
       </h3>
-      <ul className="rp-cards">
-        {shown.map(group => <GroupCard key={group.id} group={group} status={statusOf.get(group.id) ?? null} />)}
-      </ul>
+      {shown.map(block => (
+        <div key={`${block.key}|${block.items[0]?.id ?? ''}`} className="rp-group-section">
+          {block.heading ? <h4 className="rp-group-heading" lang="en">{block.heading}</h4> : null}
+          {block.items.length ? (
+            <ul className="rp-cards">
+              {block.items.map(group => <GroupCard key={group.id} group={group} status={statusOf.get(group.id) ?? null} />)}
+            </ul>
+          ) : null}
+        </div>
+      ))}
       {rest || expanded ? (
         <button type="button" className="rp-link rp-more" aria-expanded={expanded} onClick={() => setExpanded(value => !value)}>
-          {expanded ? s.showLess : format(s.showAllGroups, { n: n(section.groups.length) })}
+          {expanded ? s.showLess : format(s.showAllGroups, { n: n(cards) })}
         </button>
       ) : null}
     </section>
@@ -286,11 +308,17 @@ function GroupCard({ group, status }: { group: ProgramGroupLite; status: Eligibi
   const s = useStrings(panelStrings)
   const [open, setOpen] = useState(false)
   const textId = useId()
-  const clamp = needsClamp(group.text)
+  const clampRef = useRef<HTMLSpanElement>(null)
+  // "Show more" only when the 4-line clamp actually hides text at the current panel width.
+  const overflowing = useOverflow(clampRef, !open, group.text)
+  const mentioned = group.mentioned ?? []
+  const unresolved = group.unresolved ?? []
+  // The label is the section heading above the card; only an item number stays on the card.
+  const number = groupNumber(group)
   return (
     <li className="rp-group-card">
       <div className="rp-group-card-head">
-        <span className="rp-group-card-label" lang="en">{group.label}</span>
+        <span className="rp-group-card-label">{number !== null ? `${number}.` : ''}</span>
         {status ? (
           <span className={`rp-state rp-state-${status}`} title={s[STATE_TITLE[status]]}>
             <StatusSvg status={status} />
@@ -298,14 +326,25 @@ function GroupCard({ group, status }: { group: ProgramGroupLite; status: Eligibi
           </span>
         ) : null}
       </div>
-      <OfficialText text={group.text} clamp={clamp && !open} id={textId} />
-      {clamp ? (
+      <OfficialText text={group.text} clamp={!open} clampRef={clampRef} id={textId} />
+      {open || overflowing ? (
         <button type="button" className="rp-link rp-more" aria-expanded={open} aria-controls={textId} onClick={() => setOpen(value => !value)}>
           {open ? s.showLess : s.showMore}
         </button>
       ) : null}
       {group.ids.length ? <ChipList ids={group.ids} relation={programRelation} /> : null}
+      {mentioned.length ? (
+        <div className="rp-group-extra">
+          <p className="rp-sublabel" aria-hidden="true">{s.groupMentioned}</p>
+          <ChipList ids={mentioned} label={s.groupMentioned} muted />
+        </div>
+      ) : null}
+      {unresolved.length ? (
+        <div className="rp-group-extra">
+          <p className="rp-sublabel" aria-hidden="true">{s.notInCalendar}</p>
+          <ChipList ids={unresolved} label={s.notInCalendar} />
+        </div>
+      ) : null}
     </li>
   )
 }
-

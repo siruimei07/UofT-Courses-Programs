@@ -91,9 +91,11 @@ export interface CourseChipProps {
   status?: Eligibility | null
   /** Extra text after the code, e.g. "with ≥ 60 %". */
   suffix?: ReactNode
+  /** Codes a text only mentions (program groups): quieter chip, never counted. */
+  muted?: boolean
 }
 
-export function CourseChip({ id, relation = 'none', status = null, suffix }: CourseChipProps) {
+export function CourseChip({ id, relation = 'none', status = null, suffix, muted = false }: CourseChipProps) {
   const s = useStrings(panelStrings)
   const { dataset, courses, record, eligibility, pick } = usePanelEnv()
   const code = codeOf(id)
@@ -111,19 +113,19 @@ export function CourseChip({ id, relation = 'none', status = null, suffix }: Cou
         {external ? <span className="rp-chip-campus">{campusName(campus, s)}</span> : null}
         {suffix ? <span className="rp-chip-suffix">{suffix}</span> : null}
         {showStatus ? <StatusIcon status={status} /> : null}
-        <span className="rp-sr">. {tip}</span>
+        <span className="rp-sr">{s.srSep}{tip}</span>
       </span>
     )
   }
   const recordStatus = record.get(id)?.status ?? null
   const available = !recordStatus && eligibility?.get(id) === 'met'
+  // The title tooltip is also the accessible description, so the name carries only code and state.
   return (
-    <button type="button" className="rp-chip" title={course.title} onClick={() => pick(id)}>
+    <button type="button" className={muted ? 'rp-chip rp-chip-muted' : 'rp-chip'} title={course.title} onClick={() => pick(id)}>
       <RecordGlyph status={recordStatus} relation={relation} available={available} />
       <span lang="en">{code}</span>
-      <span className="rp-sr" lang="en">, {course.title}</span>
-      {recordStatus ? <span className="rp-sr">, {s[RECORD_LABEL[recordStatus]]}</span> : null}
-      {available ? <span className="rp-sr">, {s.availableNow}</span> : null}
+      {recordStatus ? <span className="rp-sr">{s.srSep}{s[RECORD_LABEL[recordStatus]]}</span> : null}
+      {available ? <span className="rp-sr">{s.srSep}{s.availableNow}</span> : null}
       {suffix ? <span className="rp-chip-suffix">{suffix}</span> : null}
       {showStatus ? <StatusIcon status={status} /> : null}
     </button>
@@ -131,12 +133,12 @@ export function CourseChip({ id, relation = 'none', status = null, suffix }: Cou
 }
 
 /** Wrapping row of chips. */
-export function ChipList({ ids, relation, label }: { ids: readonly string[]; relation?: (id: string) => Relation; label?: string }) {
+export function ChipList({ ids, relation, label, muted }: { ids: readonly string[]; relation?: (id: string) => Relation; label?: string; muted?: boolean }) {
   return (
     <ul className="rp-chips" aria-label={label}>
       {ids.map(id => (
         <li key={id}>
-          <CourseChip id={id} relation={relation?.(id)} />
+          <CourseChip id={id} relation={relation?.(id)} muted={muted} />
         </li>
       ))}
     </ul>

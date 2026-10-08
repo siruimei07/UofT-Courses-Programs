@@ -1,15 +1,21 @@
 import { describe, expect, it } from 'vitest'
+import { classifyRequirements } from '../src/app/readout'
+import { format } from '../src/i18n'
 import type { GraphCourse, RequirementLite } from '../src/data/schema'
-import type { EvalNode } from '../src/domain/engine-types'
+import type { CourseEvaluation, EvalNode } from '../src/domain/engine-types'
 import type { Rule } from '../src/domain/types'
-import type { ExcludedEdge, Topology } from '../src/graph/types'
+import type { EdgeKind, ExcludedEdge, Topology } from '../src/graph/types'
+import { panelStrings } from '../src/ui/panels/strings'
 import {
-  anyGroups, chainOf, isUnparsed, mentionsOf, missingCourses, needsReadout, relationsOf, ruleAsEval, unlocksReadout,
-  unresolvedOf, unwrapEval, unwrapRule,
+  chainOf, exclusionNote, isUnparsed, mentionsOf, missingCourses, missingText, nextReason, relationsOf, ruleAsEval, unlocksReadout,
+  unresolvedOf,
 } from '../src/ui/panels/summary'
 
-/** Minimal topology: only the fields the panel summary reads. */
-function topologyOf(codes: string[], edges: [string, string][], excluded: (ExcludedEdge & { codes?: never })[] = []): Topology {
+const en = panelStrings.en
+const zh = panelStrings.zh
+
+/** Minimal topology: only the fields the panel summary reads. Edges are prerequisites unless marked. */
+function topologyOf(codes: string[], edges: ([string, string] | [string, string, EdgeKind])[], excluded: (ExcludedEdge & { codes?: never })[] = []): Topology {
   const indexById = new Map(codes.map((code, index) => [`UTM:${code}`, index]))
   const at = (code: string) => indexById.get(`UTM:${code}`) as number
   const preds: number[][] = codes.map(() => [])
@@ -21,7 +27,7 @@ function topologyOf(codes: string[], edges: [string, string][], excluded: (Exclu
   return {
     nodes: codes.map((code, index) => ({ index, id: `UTM:${code}`, code, title: code, subject: code.slice(0, 3), level: 100, lane: 0, band: 0, col: 0, order: 0 })),
     indexById,
-    edges: edges.map(([from, to]) => ({ from: at(from), to: at(to), kind: 'prereq' as const })),
+    edges: edges.map(([from, to, kind = 'prereq']) => ({ from: at(from), to: at(to), kind })),
     excludedEdges: excluded,
     preds,
     succs,
@@ -59,42 +65,34 @@ describe('chain lists', () => {
   })
 })
 
-describe('needs readout (design-spec 6.3)', () => {
-  const chainC = chainOf(topo, at('C200'))
+describe('chain lists and the shared readout classifier', () => {
+  // P → F (prerequisite), Q → F (corequisite), R → Q (prerequisite of the corequisite), F → G.
+  const split = topologyOf(['P100', 'Q100', 'R100', 'F200', 'G300'], [
+    ['P100', 'F200'], ['Q100', 'F200', 'coreq'], ['R100', 'Q100'], ['F200', 'G300'],
+  ])
+  const focus = split.indexById.get('UTM:F200') as number
+  const codesIn = (indices: number[]) => indices.map(i => split.nodes[i].code)
 
-  it('plain parsed rule', () => {
-    const prereq = course({ kind: 'all', items: [c('A100'), c('B100'), c('X100')] }, ['UTM:A100', 'UTM:B100', 'UTM:X100'])
-    expect(needsReadout(prereq, chainC, topo.indexById)).toEqual({ kind: 'plain', direct: 3, total: 3 })
+  it('lists corequisites apart from the direct prerequisites', () => {
+    const chain = chainOf(split, focus)
+    expect(codesIn(chain.directPreds)).toEqual(['P100'])
+    expect(codesIn(chain.directCoreqs)).toEqual(['Q100'])
+    expect(codesIn(chain.earlierPreds)).toEqual(['R100'])
+    const relations = relationsOf(chain)
+    expect(relations.get(split.indexById.get('UTM:Q100') as number)).toBe('prereq-direct')
+    expect(relations.get(split.indexById.get('UTM:R100') as number)).toBe('prereq')
   })
 
-  it('one top-level any group covering every direct prerequisite', () => {
-    const prereq = course({ kind: 'any', items: [c('A100'), c('B100'), { kind: 'minGrade', courseId: 'UTM:X100', minimum: 60 }, c('MAT137Y5')] }, [])
-    expect(needsReadout(prereq, chainC, topo.indexById)).toEqual({ kind: 'oneOf', options: 3, total: 3 })
-  })
-
-  it('alternatives inside a larger rule', () => {
-    const prereq = course({ kind: 'all', items: [c('A100'), { kind: 'any', items: [c('B100'), c('X100')] }] }, [])
-    expect(needsReadout(prereq, chainC, topo.indexById)).toEqual({ kind: 'someAlternatives', direct: 3, total: 3 })
-    // A top-level any that does not account for every direct prerequisite is not "1 of n".
-    const partial = course({ kind: 'any', items: [c('A100'), c('B100')] }, [])
-    expect(needsReadout(partial, chainC, topo.indexById).kind).toBe('someAlternatives')
-  })
-
-  it('top-level unknown, also below a cohort wrapper', () => {
-    const unknown: Rule = { kind: 'unknown', text: 'see calendar', reason: 'x' }
-    expect(needsReadout(course(unknown, []), chainC, topo.indexById)).toEqual({ kind: 'unknown', direct: 3, total: 3 })
-    const wrapped: Rule = { kind: 'applicability', cohort: 'Fall 2026', rule: unknown }
-    expect(needsReadout(course(wrapped, []), chainC, topo.indexById).kind).toBe('unknown')
-    expect(isUnparsed(wrapped)).toBe(true)
-    expect(isUnparsed({ kind: 'all', items: [unknown, c('A100')] })).toBe(false)
-    expect(isUnparsed(undefined)).toBe(false)
-  })
-
-  it('no courses on the map vs nothing listed', () => {
-    const chainA = chainOf(topo, at('A100'))
-    expect(needsReadout(undefined, chainA, topo.indexById)).toEqual({ kind: 'none' })
-    expect(needsReadout(course({ kind: 'true' }, []), chainA, topo.indexById)).toEqual({ kind: 'none' })
-    expect(needsReadout(course({ kind: 'permission', text: 'Permission of instructor' }, []), chainA, topo.indexById)).toEqual({ kind: 'noCourses' })
+  it('agrees with the card head classifier on direct counts', () => {
+    const graphCourse: GraphCourse = {
+      id: 'UTM:F200', code: 'F200', title: 'F', subject: 'F20', level: 200, credits: 0.5,
+      prereq: course(c('P100'), ['UTM:P100']),
+      coreq: course(c('Q100'), ['UTM:Q100']),
+    }
+    const chain = chainOf(split, focus)
+    const readout = classifyRequirements(graphCourse, split, focus)
+    expect(readout.needs).toMatchObject({ kind: 'plain', direct: chain.directPreds.length })
+    expect(readout.coreqs).toEqual({ kind: 'plain', count: chain.directCoreqs.length })
   })
 
   it('unlocks readout', () => {
@@ -102,10 +100,11 @@ describe('needs readout (design-spec 6.3)', () => {
     expect(unlocksReadout(chainOf(topo, at('E400')))).toEqual({ kind: 'none' })
   })
 
-  it('collects any groups with at least two direct prerequisites', () => {
-    const rule: Rule = { kind: 'all', items: [{ kind: 'any', items: [c('A100'), c('B100')] }, { kind: 'any', items: [c('X100'), c('MAT137Y5')] }] }
-    expect(anyGroups(rule, chainC, topo.indexById)).toEqual([[at('A100'), at('B100')].sort((a, b) => a - b)])
-    expect(unwrapRule({ kind: 'applicability', cohort: 'x', rule: c('A100') })).toEqual(c('A100'))
+  it('treats a top-level unknown rule as unparsed, also below a cohort wrapper', () => {
+    const unknown: Rule = { kind: 'unknown', text: 'see calendar', reason: 'x' }
+    expect(isUnparsed({ kind: 'applicability', cohort: 'Fall 2026', rule: unknown })).toBe(true)
+    expect(isUnparsed({ kind: 'all', items: [unknown, c('A100')] })).toBe(false)
+    expect(isUnparsed(undefined)).toBe(false)
   })
 })
 
@@ -144,15 +143,64 @@ describe('evaluated trees', () => {
 
   it('finds unmet course leaves for "Needs …" reasons', () => {
     const node: EvalNode = { kind: 'all', status: 'unmet', children: [leaf('A100', 'met'), leaf('B100', 'unmet'), { kind: 'minGrade', courseId: 'UTM:X100', minimum: 60, status: 'unknown' }] }
-    expect(missingCourses(node)).toEqual({ ids: ['UTM:B100', 'UTM:X100'], oneOf: false })
+    expect(missingCourses(node)).toEqual({ required: ['UTM:B100', 'UTM:X100'], choices: [] })
     const any: EvalNode = { kind: 'applicability', status: 'unmet', text: 'cohort', children: [{ kind: 'any', status: 'unmet', children: [leaf('A100', 'unmet'), leaf('B100', 'unmet')] }] }
-    expect(missingCourses(any)).toEqual({ ids: ['UTM:A100', 'UTM:B100'], oneOf: true })
-    expect(missingCourses({ ...node, status: 'met' })).toEqual({ ids: [], oneOf: false })
-    expect(missingCourses(null)).toEqual({ ids: [], oneOf: false })
+    expect(missingCourses(any)).toEqual({ required: [], choices: [['UTM:A100', 'UTM:B100']] })
+    expect(missingCourses({ ...node, status: 'met' })).toEqual({ required: [], choices: [] })
+    expect(missingCourses(null)).toEqual({ required: [], choices: [] })
   })
 
-  it('unwraps single-child groups and cohorts', () => {
-    expect(unwrapEval({ kind: 'all', status: 'met', children: [{ kind: 'any', status: 'met', children: [leaf('A100', 'met')] }] })).toEqual(leaf('A100', 'met'))
+  it('keeps nested "one of" groups apart from required courses', () => {
+    // all(any(A, B), C): A and B are alternatives, C is required.
+    const node: EvalNode = { kind: 'all', status: 'unmet', children: [
+      { kind: 'any', status: 'unmet', children: [leaf('A100', 'unmet'), leaf('B100', 'unmet')] },
+      leaf('C200', 'unmet'),
+    ] }
+    const missing = missingCourses(node)
+    expect(missing).toEqual({ required: ['UTM:C200'], choices: [['UTM:A100', 'UTM:B100']] })
+    expect(missingText(missing, en)).toBe('C200; one of A100, B100')
+    expect(missingText(missing, zh)).toBe('C200；A100、B100 中任一门')
+    // A met alternative satisfies its group; a one-option group is simply required.
+    const metGroup: EvalNode = { ...node, children: [{ kind: 'any', status: 'met', children: [leaf('A100', 'met'), leaf('B100', 'unmet')] }, leaf('C200', 'unmet')] }
+    expect(missingCourses(metGroup)).toEqual({ required: ['UTM:C200'], choices: [] })
+    const single: EvalNode = { kind: 'any', status: 'unmet', children: [leaf('A100', 'unmet'), { kind: 'permission', status: 'unknown', text: 'x' }] }
+    expect(missingCourses(single)).toEqual({ required: ['UTM:A100'], choices: [] })
+  })
+
+  it('caps the reason line at two codes per part and two parts', () => {
+    const many = { required: ['UTM:A1', 'UTM:B2', 'UTM:C3'], choices: [['UTM:D4', 'UTM:E5'], ['UTM:F6', 'UTM:G7']] }
+    expect(missingText(many, en)).toBe('A1, B2 +1 more; one of D4, E5 +1 more')
+    expect(missingText({ required: [], choices: [] }, en)).toBeNull()
+  })
+
+  it('shows a red exclusion only for parsed matches and a soft note for possible ones', () => {
+    expect(exclusionNote({ status: 'blocked', blockedBy: ['UTM:CSC108H5'] })).toEqual({ tone: 'blocked', ids: ['UTM:CSC108H5'] })
+    expect(exclusionNote({ status: 'unknown', blockedBy: ['UTM:CSC108H5'] })).toEqual({ tone: 'maybe', ids: ['UTM:CSC108H5'] })
+    expect(exclusionNote({ status: 'unknown', blockedBy: [] })).toBeNull()
+    expect(exclusionNote({ status: 'clear', blockedBy: [] })).toBeNull()
+    expect(exclusionNote(null)).toBeNull()
+    expect(format(en.mayExclude, { codes: 'CSC108H5' })).toMatch(/^May exclude: /)
+    expect(format(zh.mayExclude, { codes: 'CSC108H5' })).toMatch(/^可能互斥：/)
+  })
+
+  it('words "Take next" reasons from the engine reason and the evaluation', () => {
+    const evaluation = (prerequisites: EvalNode | null, corequisites: EvalNode | null): CourseEvaluation => ({
+      courseId: 'UTM:F200', overall: 'unmet', prerequisites, corequisites, exclusions: null, restrictions: null,
+    })
+    const nested: EvalNode = { kind: 'all', status: 'unmet', children: [
+      { kind: 'any', status: 'unmet', children: [leaf('A100', 'unmet'), leaf('B100', 'unmet')] },
+      leaf('C200', 'unmet'),
+    ] }
+    expect(nextReason('ready', null, en)).toBe(en.reasonReady)
+    expect(nextReason('check-requirements', null, en)).toBe(en.reasonCheck)
+    expect(nextReason('needs-prerequisites', evaluation(nested, null), en)).toBe('Needs C200; one of A100, B100')
+    expect(nextReason('needs-corequisites', evaluation(null, leaf('Q100', 'unmet')), en)).toBe('Take with Q100')
+    expect(nextReason('needs-corequisites', evaluation(null, null), en)).toBe(en.reasonCoreqSome)
+    // No course to name (credits, permission): the generic line.
+    expect(nextReason('needs-prerequisites', evaluation({ kind: 'credits', status: 'unmet', minimum: 4 }, null), en)).toBe(en.reasonNeedsSome)
+    // An unmet corequisite reported as needs-prerequisites still names the corequisite.
+    expect(nextReason('needs-prerequisites', evaluation(null, leaf('Q100', 'unmet')), en)).toBe('Take with Q100')
+    expect(nextReason('needs-prerequisites', evaluation(nested, null), zh)).toBe('还需 C200；A100、B100 中任一门')
   })
 
   it('turns a rule into an unevaluated tree', () => {

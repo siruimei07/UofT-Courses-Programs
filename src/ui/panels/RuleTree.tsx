@@ -4,7 +4,8 @@ import type { EvalNode } from '../../domain/engine-types'
 import { format, useLang, useStrings } from '../../i18n'
 import { CourseChip, StatusIcon } from './CourseChip'
 import { usePanelEnv } from './context'
-import { codeOf, formatCredits } from './format'
+import { codeOf, creditsText, formatCredits } from './format'
+import { Template } from './parts'
 import { panelStrings } from './strings'
 import type { Relation } from './summary'
 
@@ -54,7 +55,7 @@ function RuleNode({ node, relationOf }: TreeProps) {
     case 'credits':
       return (
         <span className="rp-leaf">
-          <span className="rp-num">{format(s.creditsLeaf, { n: formatCredits(node.minimum ?? 0, lang) })}</span>
+          <span className="rp-num">{creditsText(node.minimum ?? 0, lang, s)}</span>
           {node.earned !== undefined ? <span className="rp-leaf-meta">{format(s.creditsEarned, { n: formatCredits(node.earned, lang) })}</span> : null}
           {node.text ? <span className="rp-leaf-meta" lang="en">{node.text}</span> : null}
           {status ? <StatusIcon status={status} /> : null}
@@ -63,7 +64,9 @@ function RuleNode({ node, relationOf }: TreeProps) {
     case 'permission':
       return (
         <span className="rp-leaf">
-          <span className="rp-leaf-label">{s.permission}:</span> <span lang="en">{node.text}</span>
+          <span>
+            <Template template={s.permissionLeaf} slots={{ text: <span lang="en">{node.text}</span> }} textClassName="rp-leaf-label" />
+          </span>
           {status ? <StatusIcon status={status} /> : null}
         </span>
       )
@@ -86,7 +89,9 @@ function RuleNode({ node, relationOf }: TreeProps) {
       return (
         <div className="rp-group">
           <div className="rp-group-head">
-            <span>{format(s.appliesTo, { cohort: node.text ?? '' })}</span>
+            <span>
+              <Template template={s.appliesTo} slots={{ cohort: <span lang="en">{node.text}</span> }} />
+            </span>
             {status ? <StatusIcon status={status} /> : null}
           </div>
           {child ? (

@@ -3,8 +3,9 @@
 import type { GraphCourse } from '../../data/schema'
 import type { RecordEntry } from '../../app/store'
 import { parseRecord, serializeRecord } from '../../app/persist'
-import type { RecordStatus } from '../../graph/types'
-import { codeOf, creditsFromCode } from './format'
+import type { CourseEngine } from '../../domain/engine-types'
+import type { Eligibility, RecordStatus } from '../../graph/types'
+import { codeOf, creditsFromCode, parseGrade } from './format'
 
 export const STATUS_ORDER: readonly RecordStatus[] = ['completed', 'inProgress', 'planned']
 export const RECORD_FILE_NAME = 'uoft-course-map-record.json'
@@ -31,6 +32,53 @@ export function groupRecord(record: ReadonlyMap<string, RecordEntry>, courses: R
   }
   for (const status of STATUS_ORDER) groups[status].sort((a, b) => a.code.localeCompare(b.code))
   return groups
+}
+
+export type RecordChoice = RecordStatus | 'none'
+
+/**
+ * What a click on the record control writes for a course: an entry, null to remove it, or
+ * 'unchanged' when the choice is already stored. Only the stored entry is consulted, so an old
+ * grade typed earlier can never come back; a grade survives only on a move to Completed.
+ */
+export function nextRecordEntry(entry: RecordEntry | undefined, choice: RecordChoice): RecordEntry | null | 'unchanged' {
+  if (choice === 'none') return entry ? null : 'unchanged'
+  if (entry?.status === choice) return 'unchanged'
+  return choice === 'completed' && entry?.grade !== undefined ? { status: 'completed', grade: entry.grade } : { status: choice }
+}
+
+/** The completed entry a grade edit writes, or 'unchanged' when the text is invalid or already stored. */
+export function gradedEntry(entry: RecordEntry | undefined, text: string): RecordEntry | 'unchanged' {
+  const parsed = parseGrade(text)
+  if (parsed === 'invalid') return 'unchanged'
+  const grade = parsed ?? undefined
+  if (entry?.status === 'completed' && entry.grade === grade) return 'unchanged'
+  return grade === undefined ? { status: 'completed' } : { status: 'completed', grade }
+}
+
+/** Grade input text for a stored grade. */
+export function gradeText(grade: number | undefined): string {
+  return grade === undefined ? '' : String(grade)
+}
+
+/**
+ * The grade input after the stored grade changed (typing, import, clear all, another tab): what
+ * the student typed stays while it still means the stored grade ("080" for 80); otherwise the
+ * input shows the stored grade.
+ */
+export function syncGradeDraft(draft: string, grade: number | undefined): string {
+  return parseGrade(draft) === (grade ?? null) ? draft : gradeText(grade)
+}
+
+const eligibilityCache = new WeakMap<CourseEngine, WeakMap<ReadonlyMap<string, RecordEntry>, Map<string, Eligibility>>>()
+
+/** engine.eligibility, computed once per engine and record (the record is replaced on every change). */
+export function cachedEligibility(engine: CourseEngine, record: ReadonlyMap<string, RecordEntry>): Map<string, Eligibility> {
+  let byRecord = eligibilityCache.get(engine)
+  if (!byRecord) eligibilityCache.set(engine, (byRecord = new WeakMap()))
+  let result = byRecord.get(record)
+  if (!result) byRecord.set(record, (result = engine.eligibility(record)))
+  return result
 }
 
 /** A completed course with a grade below 50 is a fail (UTM Calendar) and earns no credit. */

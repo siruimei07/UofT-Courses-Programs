@@ -1,8 +1,12 @@
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import type { RecordEntry } from '../src/app/store'
 import type { ProgramLite } from '../src/data/schema'
 import type { ProgramProgress } from '../src/domain/engine-types'
-import { categories, filterPrograms, needsClamp, programTypeChips, programTypeOf, tally } from '../src/ui/panels/programs'
+import {
+  capSections, categories, filterPrograms, groupNumber, groupSections, isHeadingOnly, isOverflowing, programTypeChips, programTypeOf, tally,
+} from '../src/ui/panels/programs'
 
 const program = (code: string, title: string, type: string, groups: ProgramLite['groups'] = []): ProgramLite => ({
   id: `UTM:${code}`, code, title: `${title} - ${code}`, type, sourceUrl: '', description: '', admissionText: '', completionText: '', groups,
@@ -45,6 +49,12 @@ describe('program picker', () => {
     expect(codes('', 'other')).toEqual(['ERXXX0003'])
     expect(codes('computer', 'Minor')).toEqual([])
   })
+
+  it('does not match page slugs that only stand in for a missing POSt code', () => {
+    const slugged: ProgramLite = { ...program('computer-science-cert', '', 'Certificate'), title: 'Certificate in Computing', codeSource: 'url-slug' }
+    expect(filterPrograms([slugged], 'computer-science-cert', 'all')).toEqual([])
+    expect(filterPrograms([slugged], 'computing', 'all')).toEqual([slugged])
+  })
 })
 
 describe('program progress', () => {
@@ -57,6 +67,23 @@ describe('program progress', () => {
   it('counts completed courses among unique listed ids', () => {
     expect(tally(['UTM:CSC108H5', 'UTM:CSC148H5', 'UTM:CSC108H5', 'UTM:CSC207H5'], record)).toEqual({ done: 1, total: 3 })
     expect(tally([], record)).toEqual({ done: 0, total: 0 })
+  })
+
+  it('does not count failed courses (grade below 50) as completed', () => {
+    // Review repro: CSC108H5 at 30 and MAT102H5 at 20 read "2 of 43" while the engine said 0.
+    const failed = new Map<string, RecordEntry>([
+      ['UTM:CSC108H5', { status: 'completed', grade: 30 }],
+      ['UTM:MAT102H5', { status: 'completed', grade: 20 }],
+      ['UTM:MAT135H5', { status: 'completed', grade: 49.5 }],
+      ['UTM:MAT137Y5', { status: 'completed', grade: 50 }],
+      ['UTM:STA107H5', { status: 'completed' }],
+    ])
+    expect(tally(['UTM:CSC108H5', 'UTM:MAT102H5', 'UTM:MAT135H5', 'UTM:MAT137Y5', 'UTM:STA107H5'], failed)).toEqual({ done: 2, total: 5 })
+    const groups: ProgramLite['groups'] = [
+      { id: 'c1', label: 'First Year', category: 'completion', text: '', rule: { kind: 'true' }, ids: ['UTM:CSC108H5', 'UTM:MAT102H5', 'UTM:MAT137Y5'] },
+    ]
+    const [, completion] = categories(program('ERMAJ1688', 'Computer Science - Major', 'Major', groups), null, failed)
+    expect(completion.tally).toEqual({ done: 1, total: 3 })
   })
 
   it('splits groups into admission and completion with their own tallies', () => {
@@ -87,8 +114,49 @@ describe('program progress', () => {
     expect(categories(p, null, record)[0].tally).toEqual({ done: 1, total: 2 })
   })
 
-  it('clamps only long official text', () => {
-    expect(needsClamp('CSC207H5 and CSC236H5')).toBe(false)
-    expect(needsClamp('x'.repeat(201))).toBe(true)
+  it('offers "Show more" only when the clamped text really overflows', () => {
+    expect(isOverflowing(120, 80)).toBe(true)
+    expect(isOverflowing(81, 80)).toBe(false)
+    expect(isOverflowing(80, 80)).toBe(false)
+    // A hidden tab measures 0 x 0 until it is shown.
+    expect(isOverflowing(0, 0)).toBe(false)
+  })
+})
+
+describe('program group sections (student QA: pathways, heading-only groups)', () => {
+  const real = (JSON.parse(readFileSync(join(process.cwd(), 'public', 'data', 'utm', 'programs.json'), 'utf8')) as { programs: ProgramLite[] }).programs
+  const csMajor = real.find(item => item.code === 'ERMAJ1688')!
+  const admission = csMajor.groups.filter(group => group.category === 'admission')
+
+  it('turns heading-only groups into section headings instead of cards with a "check" badge', () => {
+    const heading = admission.find(group => group.text.startsWith('For students admitted through the CMP1'))!
+    expect(isHeadingOnly(heading)).toBe(true)
+    // A group with courses, or a note whose text is not its label, stays a card.
+    expect(isHeadingOnly(admission.find(group => group.ids.length > 0)!)).toBe(false)
+    expect(isHeadingOnly(admission.find(group => group.label.startsWith('Notes:'))!)).toBe(false)
+    const sections = groupSections(admission)
+    for (const section of sections) for (const item of section.items) expect(isHeadingOnly(item), item.text).toBe(false)
+    // Every pathway is one section headed once by its official framing text.
+    const pathways = sections.filter(section => section.heading?.startsWith('For students admitted'))
+    expect(pathways.length).toBeGreaterThanOrEqual(3)
+    expect(pathways[0].heading).toBe('For students admitted through the CMP1 admission category in Fall 2026 and beyond:')
+    expect(pathways[0].items.map(item => item.text)).toEqual(['CSC110Y5 (70%)', 'CSC111H5 (77%)', 'MAT139H5 or MAT159H5', 'ISP100H5'])
+    // The generic "Admission" label is never repeated under the localized Admission heading.
+    expect(sections[0].heading).toBeNull()
+    // Numbered notes share one "Notes:" section and keep their numbers.
+    const notes = sections.find(section => section.key === 'Notes:')!
+    expect(notes.items.map(groupNumber)).toEqual([1, 2, 3, null])
+    // No card is lost: cards + heading-only groups = all groups.
+    expect(sections.reduce((n, section) => n + section.items.length, 0) + admission.filter(isHeadingOnly).length).toBe(admission.length)
+  })
+
+  it('collapses to whole sections, so a pathway is never cut in half', () => {
+    const sections = groupSections(admission)
+    const { shown, rest } = capSections(sections, 8, false)
+    const cards = shown.reduce((n, section) => n + section.items.length, 0)
+    expect(cards).toBeGreaterThanOrEqual(8)
+    expect(shown.length).toBeLessThan(sections.length)
+    expect(rest).toBe(sections.reduce((n, section) => n + section.items.length, 0) - cards)
+    expect(capSections(sections, 8, true)).toEqual({ shown: sections, rest: 0 })
   })
 })

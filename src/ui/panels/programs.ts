@@ -2,6 +2,8 @@
 import type { ProgramGroupLite, ProgramLite } from '../../data/schema'
 import type { RecordEntry } from '../../app/store'
 import type { ProgramProgress } from '../../domain/engine-types'
+import { programCode } from './format'
+import { earnsCredit } from './record'
 
 /** Official program types in picker order; anything else is "Other". */
 export const PROGRAM_TYPES = ['Specialist', 'Major', 'Minor', 'Certificate', 'Focus'] as const
@@ -26,13 +28,13 @@ export function programTypeChips(programs: readonly ProgramLite[]): { type: Prog
   ]
 }
 
-/** Every query word must appear in the title, code or type; results sorted by title. */
+/** Every query word must appear in the title, POSt code or type; results sorted by title. */
 export function filterPrograms(programs: readonly ProgramLite[], query: string, type: ProgramTypeFilter): ProgramLite[] {
   const words = query.trim().toLowerCase().split(/\s+/).filter(Boolean)
   return programs
     .filter(program => type === 'all' || programTypeOf(program.type) === type)
     .filter(program => {
-      const haystack = `${program.title} ${program.code} ${program.type}`.toLowerCase()
+      const haystack = `${program.title} ${programCode(program) ?? ''} ${program.type}`.toLowerCase()
       return words.every(word => haystack.includes(word))
     })
     .sort((a, b) => a.title.localeCompare(b.title) || a.code.localeCompare(b.code))
@@ -43,11 +45,14 @@ export interface CourseTally {
   total: number
 }
 
-/** Completed courses among a set of listed course ids. */
+/** Completed courses that earn credit (no grade, or 50 and above) among a set of listed course ids. */
 export function tally(ids: Iterable<string>, record: ReadonlyMap<string, RecordEntry>): CourseTally {
   const unique = new Set(ids)
   let done = 0
-  for (const id of unique) if (record.get(id)?.status === 'completed') done++
+  for (const id of unique) {
+    const entry = record.get(id)
+    if (entry?.status === 'completed' && earnsCredit(entry)) done++
+  }
   return { done, total: unique.size }
 }
 
@@ -67,7 +72,75 @@ export function categories(program: ProgramLite, progress: ProgramProgress | nul
   })
 }
 
-/** Official text long enough to be clamped to 4 lines in a 300 px panel. */
-export function needsClamp(text: string): boolean {
-  return text.length > 200
+/** The pipeline's generic group labels (the category itself): never repeated as a section heading. */
+export const GENERIC_GROUP_LABELS: readonly string[] = ['Admission', 'Completion']
+
+/** One run of groups sharing a label: a pathway ("For students admitted through …:"), a year, notes. */
+export interface GroupSection {
+  key: string
+  /** Shown once above the section's cards; null for the generic category label. */
+  heading: string | null
+  /** Requirement groups to show as cards (a heading-only group becomes the heading instead). */
+  items: ProgramGroupLite[]
+}
+
+const NUMBERED = /\s*·\s*\d+$/
+const normal = (text: string) => text.replace(/\s+/g, ' ').trim().toLowerCase()
+
+/** Item number the pipeline appended to a label ("Notes: · 2" → 2), if any. */
+export function groupNumber(group: ProgramGroupLite): number | null {
+  const match = /·\s*(\d+)$/.exec(group.label)
+  return match ? Number(match[1]) : null
+}
+
+/**
+ * A group that only frames the ones after it ("For students admitted through the CMP1 admission
+ * category …:"): no course of its own and its text is its label (or the end of it).
+ */
+export function isHeadingOnly(group: ProgramGroupLite): boolean {
+  if (group.ids.length || group.mentioned?.length || group.unresolved?.length) return false
+  const label = normal(group.label.replace(NUMBERED, ''))
+  const text = normal(group.text)
+  return Boolean(text) && (label === text || label.endsWith(text))
+}
+
+/**
+ * Consecutive groups with one label become a section with that label as its heading, so a pathway's
+ * steps read as one block and "one of three pathways" is visible; heading-only groups are not
+ * repeated as cards (they had no courses and only a "check" badge).
+ */
+export function groupSections(groups: readonly ProgramGroupLite[]): GroupSection[] {
+  const sections: GroupSection[] = []
+  for (const group of groups) {
+    const key = group.label.replace(NUMBERED, '').trim()
+    let section = sections[sections.length - 1]
+    if (!section || section.key !== key) {
+      section = { key, heading: GENERIC_GROUP_LABELS.includes(key) ? null : key, items: [] }
+      sections.push(section)
+    }
+    if (!isHeadingOnly(group)) section.items.push(group)
+  }
+  return sections.filter(section => section.items.length || section.heading)
+}
+
+/**
+ * Sections shown before "Show all": whole sections, until the cards shown reach `limit` (the section
+ * that crosses it is shown complete, so a pathway is never cut in half).
+ */
+export function capSections(sections: readonly GroupSection[], limit: number, expanded: boolean): { shown: GroupSection[]; rest: number } {
+  if (expanded) return { shown: [...sections], rest: 0 }
+  const shown: GroupSection[] = []
+  let cards = 0
+  for (const section of sections) {
+    if (cards >= limit) break
+    shown.push(section)
+    cards += section.items.length
+  }
+  const total = sections.reduce((sum, section) => sum + section.items.length, 0)
+  return { shown, rest: total - cards }
+}
+
+/** A clamped block overflows when its content is taller than its box (1 px of rounding allowed). */
+export function isOverflowing(scrollHeight: number, clientHeight: number): boolean {
+  return scrollHeight - clientHeight > 1
 }

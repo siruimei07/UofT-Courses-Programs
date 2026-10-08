@@ -1,20 +1,25 @@
 // Small building blocks shared by the three panels.
-import { useId, useMemo, useRef, type KeyboardEvent, type ReactNode } from 'react'
+import { useId, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode, type Ref, type RefObject } from 'react'
 import { actions, useApp } from '../../app/store'
 import { format, useStrings } from '../../i18n'
 import { PanelContext, usePanelEnv, type PanelEnv } from './context'
 import { academicYearText, courseIndex, splitTemplate } from './format'
+import { isOverflowing } from './programs'
+import { cachedEligibility } from './record'
 import { panelStrings } from './strings'
 import type { PanelProps } from './types'
 
-/** Provides the panel environment from PanelProps (RightPanel does this once for all panels). */
-export function PanelEnvProvider({ props, children }: { props: PanelProps; children: ReactNode }) {
+/**
+ * Provides the panel environment from PanelProps (RightPanel does this once for all panels).
+ * `onPick` runs before a chip selects a course, so the host can move focus to the new title.
+ */
+export function PanelEnvProvider({ props, onPick, children }: { props: PanelProps; onPick?(courseId: string): void; children: ReactNode }) {
   const record = useApp(state => state.record)
-  const { campus, dataset, topology, engine, onCenter } = props
+  const { campus, dataset, topology, engine } = props
   const eligibility = useMemo(() => {
     if (!record.size) return null
     try {
-      return engine.eligibility(record)
+      return cachedEligibility(engine, record)
     } catch {
       // Without eligibility the chips simply omit the "available now" ring.
       return null
@@ -27,21 +32,40 @@ export function PanelEnvProvider({ props, children }: { props: PanelProps; child
     courses: courseIndex(dataset),
     record,
     eligibility,
+    // The shell frames every selection that does not come from the map, so a pick only selects.
     pick(courseId) {
+      onPick?.(courseId)
       actions.selectCourse(courseId)
-      onCenter(courseId)
     },
-  }), [campus, dataset, topology, record, eligibility, onCenter])
+  }), [campus, dataset, topology, record, eligibility, onPick])
   return <PanelContext.Provider value={env}>{children}</PanelContext.Provider>
 }
 
-/** Official calendar wording, verbatim (always English). */
-export function OfficialText({ text, clamp = false, id }: { text: string; clamp?: boolean; id?: string }) {
+/** Official calendar wording, verbatim (always English); `clamp` limits it to 4 lines. */
+export function OfficialText({ text, clamp = false, clampRef, id }: { text: string; clamp?: boolean; clampRef?: Ref<HTMLSpanElement>; id?: string }) {
   return (
     <p className="rp-official" lang="en" id={id}>
-      {clamp ? <span className="rp-clamp">{text}</span> : text}
+      {clamp ? <span ref={clampRef} className="rp-clamp">{text}</span> : text}
     </p>
   )
+}
+
+/**
+ * Whether the clamped element hides part of its content, measured while `active` and again when
+ * its box changes (panel width, tab shown). Keeps the last answer while inactive (expanded).
+ */
+export function useOverflow(ref: RefObject<HTMLElement | null>, active: boolean, content: string): boolean {
+  const [overflow, setOverflow] = useState(false)
+  useLayoutEffect(() => {
+    const element = ref.current
+    if (!active || !element) return
+    const measure = () => setOverflow(isOverflowing(element.scrollHeight, element.clientHeight))
+    measure()
+    const observer = new ResizeObserver(measure)
+    observer.observe(element)
+    return () => observer.disconnect()
+  }, [ref, active, content])
+  return overflow
 }
 
 /** Renders a template with its values set in bold tabular numerals. */
@@ -50,6 +74,21 @@ export function Readout({ template, values }: { template: string; values: Record
     <>
       {splitTemplate(template, values).map((part, i) =>
         'key' in part ? <b key={i} className="rp-num">{part.value}</b> : <span key={i}>{part.text}</span>,
+      )}
+    </>
+  )
+}
+
+/**
+ * Renders a UI template with elements in its slots, so official wording inside a translated
+ * sentence keeps `lang="en"` ("Delivered at {place}", "授课地点：{place}").
+ */
+export function Template({ template, slots, textClassName }: { template: string; slots: Record<string, ReactNode>; textClassName?: string }) {
+  const keys = Object.fromEntries(Object.keys(slots).map(key => [key, '']))
+  return (
+    <>
+      {splitTemplate(template, keys).map((part, i) =>
+        'key' in part ? <span key={i}>{slots[part.key]}</span> : <span key={i} className={textClassName}>{part.text}</span>,
       )}
     </>
   )

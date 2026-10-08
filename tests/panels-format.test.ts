@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest'
+import { format } from '../src/i18n'
 import {
-  academicYearText, campusOf, capList, codeList, codeOf, coursePageUrl, creditsFromCode, creditsText, formatCredits,
-  levelText, parseGrade, programDisplayTitle, pushRecent, splitTemplate,
+  academicYearText, campusOf, capList, codeList, codeOf, coursePageUrl, coursesText, creditsFromCode, creditsText, formatCredits,
+  levelText, parseGrade, plural, programCode, programDisplayTitle, pushRecent, splitTemplate,
 } from '../src/ui/panels/format'
 import { panelStrings } from '../src/ui/panels/strings'
 
@@ -57,11 +58,21 @@ describe('ids, links and labels', () => {
     expect(creditsText(2.5, 'zh', zh)).toBe('2.5 学分')
   })
 
+  it('writes zero credits as "0 credits", never "0.0 credit"', () => {
+    expect(creditsText(0, 'en', en)).toBe('0 credits')
+    expect(creditsText(0, 'zh', zh)).toBe('0 学分')
+  })
+
   it('pads levels and dashes academic years', () => {
     expect(levelText(0)).toBe('000')
     expect(levelText(300)).toBe('300')
     expect(academicYearText('2026-2027')).toBe('2026–2027')
     expect(academicYearText('synthetic')).toBe('synthetic')
+  })
+
+  it('shows a program code only when it is a real POSt code', () => {
+    expect(programCode({ code: 'ERMAJ1688' })).toBe('ERMAJ1688')
+    expect(programCode({ code: 'certificate-in-computing', codeSource: 'url-slug' })).toBeNull()
   })
 
   it('drops the trailing code from program titles only when it is the suffix', () => {
@@ -106,8 +117,40 @@ describe('small list helpers', () => {
     expect(capList(items.slice(0, 3), 24, false).rest).toBe(0)
   })
 
-  it('lists codes with a "+n more" tail', () => {
+  it('lists codes with a "+n more" tail, with Chinese punctuation in Chinese', () => {
     expect(codeList(['UTM:MAT135H5'], 2, en)).toBe('MAT135H5')
     expect(codeList(['UTM:A1', 'UTM:B2', 'UTM:C3', 'UTM:D4'], 2, en)).toBe('A1, B2 +2 more')
+    expect(codeList(['UTM:A1', 'UTM:B2', 'UTM:C3'], 2, zh)).toBe('A1、B2 及另外 1 门')
+    expect(zh.listSep).toBe('、')
+    expect(format(zh.permissionLeaf, { text: 'x' })).toBe('需要许可：x')
+  })
+})
+
+describe('singular and plural copy', () => {
+  it('picks the singular template for exactly one', () => {
+    expect(plural(0, 'one', 'many')).toBe('many')
+    expect(plural(1, 'one', 'many')).toBe('one')
+    expect(plural(2, 'one', 'many')).toBe('many')
+  })
+
+  it('counts courses for 0, 1 and many in both languages', () => {
+    expect([0, 1, 12].map(n => coursesText(n, 'en', en))).toEqual(['0 courses', '1 course', '12 courses'])
+    expect([0, 1, 12].map(n => coursesText(n, 'zh', zh))).toEqual(['0 门课程', '1 门课程', '12 门课程'])
+    expect(coursesText(1200, 'en', en)).toBe('1,200 courses')
+  })
+
+  it('reads the import, clear and progress lines correctly for one course', () => {
+    expect(format(en.importDone, { courses: coursesText(1, 'en', en), file: 'r.json' })).toBe('Imported 1 course from r.json.')
+    expect(format(en.importDone, { courses: coursesText(0, 'en', en), file: 'r.json' })).toBe('Imported 0 courses from r.json.')
+    expect(format(zh.importDone, { courses: coursesText(1, 'zh', zh), file: 'r.json' })).toBe('已从 r.json 导入 1 门课程。')
+    expect(format(plural(1, en.clearConfirmOne, en.clearConfirmMany), { n: 1 })).toBe('Clear the 1 course on your record?')
+    expect(format(plural(12, en.clearConfirmOne, en.clearConfirmMany), { n: 12 })).toBe('Clear all 12 courses?')
+    expect(format(plural(1, en.progressOne, en.progressMany), { done: 0, total: 1 })).toBe('Completed 0 of 1 listed course')
+    expect(format(plural(43, en.progressOne, en.progressMany), { done: 3, total: 43 })).toBe('Completed 3 of 43 listed courses')
+    expect(format(plural(1, en.categoryProgressOne, en.categoryProgressMany), { done: 1, total: 1 })).toBe('1 of 1 course completed')
+    expect(format(plural(1, en.readoutUnknownOne, en.readoutUnknown), { d: 1, t: 4 })).toBe('1 direct prerequisite · see official text · 4 related in total')
+    expect(format(plural(1, en.coreqOne, en.coreqMany), { n: 1 })).toBe('+ 1 corequisite')
+    expect(format(en.importReplace, { current: coursesText(30, 'en', en), incoming: coursesText(0, 'en', en), file: 'r.json' }))
+      .toBe('Replace your 30 courses with 0 courses from r.json?')
   })
 })
