@@ -2,18 +2,22 @@
 // colour encodes the relation to the selected course. Other-campus and unresolved references
 // render as plain, non-clickable chips.
 import type { ReactNode } from 'react'
-import type { Eligibility, RecordStatus } from '../../graph/types'
+import type { Eligibility } from '../../graph/types'
 import { format, useStrings } from '../../i18n'
 import { usePanelEnv } from './context'
 import { academicYearText, campusOf, codeOf } from './format'
+import { recordMark, type RecordMark } from './record'
 import { panelStrings, type PanelStrings } from './strings'
 import type { Relation } from './summary'
 
 const TRANSITIVE: ReadonlySet<Relation> = new Set(['prereq', 'unlock'])
 
-/** 12 × 12 glyph: disc (not taken), check square (completed), half disc (in progress), dashed ring (planned). */
+/**
+ * 12 × 12 glyph: disc (not taken), check square (completed), half disc (in progress), dashed ring
+ * (planned), crossed hollow square (failed: completed below 50, not passed, may be retaken).
+ */
 export function RecordGlyph({ status, relation = 'none', available = false, size = 12 }: {
-  status: RecordStatus | null
+  status: RecordMark | null
   relation?: Relation
   /** "Available now": not taken and eligible; adds the outer ring (7.2). */
   available?: boolean
@@ -27,6 +31,11 @@ export function RecordGlyph({ status, relation = 'none', available = false, size
         <>
           <rect x="1.5" y="1.5" width="9" height="9" rx="2" fill="currentColor" />
           <path className="rp-glyph-cut" d="M3.6 6.1 5.3 7.8 8.5 4.4" fill="none" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+        </>
+      ) : status === 'failed' ? (
+        <>
+          <rect x="1.75" y="1.75" width="8.5" height="8.5" rx="2" className="rp-glyph-hole" stroke="currentColor" strokeWidth="1.5" />
+          <path d="M4.4 4.4 7.6 7.6M7.6 4.4 4.4 7.6" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
         </>
       ) : status === 'inProgress' ? (
         <>
@@ -75,7 +84,7 @@ export function StatusIcon({ status }: { status: Eligibility }) {
   )
 }
 
-export const RECORD_LABEL: Record<RecordStatus, keyof PanelStrings> = { completed: 'completed', inProgress: 'inProgress', planned: 'planned' }
+export const RECORD_LABEL: Record<RecordMark, keyof PanelStrings> = { completed: 'completed', inProgress: 'inProgress', planned: 'planned', failed: 'notPassed' }
 
 export function campusName(campus: string, s: PanelStrings): string {
   if (campus === 'UTSG') return s.campusUTSG
@@ -117,14 +126,15 @@ export function CourseChip({ id, relation = 'none', status = null, suffix, muted
       </span>
     )
   }
-  const recordStatus = record.get(id)?.status ?? null
-  const available = !recordStatus && eligibility?.get(id) === 'met'
+  // A failed attempt shows as failed, never as completed.
+  const mark = recordMark(record.get(id))
+  const available = !mark && eligibility?.get(id) === 'met'
   // The title tooltip is also the accessible description, so the name carries only code and state.
   return (
     <button type="button" className={muted ? 'rp-chip rp-chip-muted' : 'rp-chip'} title={course.title} onClick={() => pick(id)}>
-      <RecordGlyph status={recordStatus} relation={relation} available={available} />
+      <RecordGlyph status={mark} relation={relation} available={available} />
       <span lang="en">{code}</span>
-      {recordStatus ? <span className="rp-sr">{s.srSep}{s[RECORD_LABEL[recordStatus]]}</span> : null}
+      {mark ? <span className="rp-sr">{s.srSep}{s[RECORD_LABEL[mark]]}</span> : null}
       {available ? <span className="rp-sr">{s.srSep}{s.availableNow}</span> : null}
       {suffix ? <span className="rp-chip-suffix">{suffix}</span> : null}
       {showStatus ? <StatusIcon status={status} /> : null}

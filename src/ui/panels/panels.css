@@ -50,6 +50,21 @@
   box-shadow: var(--shadow-card);
   overflow: hidden;
 }
+.rp-card-inner {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+/* Motion (design-spec 17): the content fades in over 120 ms when the panel expands from the rail.
+   The animation sits on the wrapper, which only an expand shows again (the card's `hidden`); a tab
+   switch only toggles the bodies inside it, so it never slides or fades. */
+.rp-card[data-motion='enter'] > .rp-card-inner { animation: rp-enter 120ms ease-out; }
+@keyframes rp-enter {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
 .rp-tabs {
   flex: none;
   height: 44px;
@@ -337,6 +352,20 @@
 .rp-seg-btn:focus-visible { outline-offset: 1px; }
 
 .rp-record { display: grid; gap: 8px; }
+/* A failed attempt (completed below 50): not passed, may be retaken. */
+.rp-failed-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--surface-2);
+  color: var(--ink-2);
+  font-size: 12px;
+  line-height: 1.45;
+}
+.rp-failed-note .rp-glyph { margin-top: 2px; color: var(--danger); }
 .rp-grade { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; color: var(--ink-2); font-size: 12.5px; }
 .rp-grade-input { width: 64px; height: 28px; text-align: right; }
 
@@ -406,6 +435,11 @@ button.rp-chip:hover { background: var(--hover); }
 .rp-caret { flex: none; color: var(--ink-3); transition: transform 120ms; }
 .rp-disclosure-btn[aria-expanded='true'] .rp-caret { transform: rotate(90deg); }
 .rp-chain-row-static { padding: 4px 0 4px 16px; }
+/* The 10 px glyph sits on the dots' axis and the first line (the row wraps at 300 px), and its
+   text lines up with the readouts below. */
+.rp-failed-row .rp-readout { align-items: flex-start; gap: 6px; }
+.rp-failed-row .rp-glyph { margin: 4px 0 0 -2px; color: var(--danger); }
+.rp-failed-label { font-weight: 600; color: var(--danger); }
 .rp-chain-lists { display: grid; gap: 10px; padding: 6px 0 8px 16px; }
 
 /* ---- rule tree ---------------------------------------------------------------------------- */
@@ -643,6 +677,7 @@ button.rp-rrow-main { align-items: center; }
 .rp-rrow-title { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 12.5px; color: var(--ink-2); }
 .rp-rrow-missing .rp-rrow-title { color: var(--ink-3); }
 .rp-rrow-grade { flex: none; padding: 0 2px; font-size: 12.5px; color: var(--ink-2); }
+.rp-rrow-failed { color: var(--danger); font-weight: 600; }
 .rp-actions {
   position: sticky;
   bottom: 0;
@@ -655,3 +690,10 @@ button.rp-rrow-main { align-items: center; }
 }
 .rp-action-row, .rp-confirm { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 .rp-confirm > span { flex: 1 1 100%; font-size: 12.5px; color: var(--ink); }
+
+/* ---- reduced motion ------------------------------------------------------------------------- */
+
+@media (prefers-reduced-motion: reduce) {
+  .rp-card[data-motion='enter'] > .rp-card-inner { animation: none; }
+  .rp-caret { transition: none; }
+}

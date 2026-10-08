@@ -4,8 +4,11 @@ import type { GraphCourse } from '../../data/schema'
 import type { RecordEntry } from '../../app/store'
 import { parseRecord, serializeRecord } from '../../app/persist'
 import type { CourseEngine } from '../../domain/engine-types'
+import { isFailed } from '../../domain/evaluate'
 import type { Eligibility, RecordStatus } from '../../graph/types'
+import { format } from '../../i18n'
 import { codeOf, creditsFromCode, parseGrade } from './format'
+import type { PanelStrings } from './strings'
 
 export const STATUS_ORDER: readonly RecordStatus[] = ['completed', 'inProgress', 'planned']
 export const RECORD_FILE_NAME = 'uoft-course-map-record.json'
@@ -83,7 +86,24 @@ export function cachedEligibility(engine: CourseEngine, record: ReadonlyMap<stri
 
 /** A completed course with a grade below 50 is a fail (UTM Calendar) and earns no credit. */
 export function earnsCredit(entry: RecordEntry): boolean {
-  return entry.status !== 'completed' || entry.grade === undefined || entry.grade >= 50
+  return !isFailed(entry)
+}
+
+/**
+ * What the record glyphs and labels show for a course: its stored status, or 'failed' for a
+ * completed course graded below 50, which is not passed and may be retaken (the engine treats it
+ * as not taken for prerequisites, credits and exclusions).
+ */
+export type RecordMark = RecordStatus | 'failed'
+
+export function recordMark(entry: RecordEntry | undefined): RecordMark | null {
+  if (!entry) return null
+  return isFailed(entry) ? 'failed' : entry.status
+}
+
+/** The grade of a failed attempt, or null when the course is not on the record as failed. */
+export function failedGrade(entry: RecordEntry | undefined): number | null {
+  return entry && isFailed(entry) ? entry.grade ?? null : null
 }
 
 /** Credits of a group, rounded to avoid 0.1 + 0.2 artefacts. */
@@ -103,8 +123,8 @@ export function recordTotals(groups: RecordGroups): Record<RecordStatus, StatusT
 }
 
 export type ImportError =
-  | { key: 'importNotJson' | 'importNotObject' | 'importFormat' | 'importTooLarge' | 'importUnreadable' }
-  | { key: 'importBadId' | 'importBadStatus' | 'importBadGrade'; id: string }
+  | { key: 'importNotJson' | 'importNotObject' | 'importFormat' | 'importTooLarge' | 'importUnreadable' | 'importDuplicateSome' }
+  | { key: 'importBadId' | 'importBadStatus' | 'importBadGrade' | 'importDuplicate'; id: string }
   | { key: 'importFailed'; message: string }
 
 /** Maps a JSON.parse or parseRecord failure to a localisable message. */
@@ -118,7 +138,20 @@ export function mapImportError(error: unknown): ImportError {
     const key = withId[1] === 'course id' ? 'importBadId' : withId[1] === 'status for' ? 'importBadStatus' : 'importBadGrade'
     return { key, id: withId[2] }
   }
+  // A file that lists a course twice: parseRecord throws 'Duplicate course id: <id>'. Only the
+  // course id is taken from the message, so no English wording ever reaches the Chinese UI.
+  if (message.startsWith('Duplicate course id')) {
+    const id = /\b[A-Z]{2,5}:[A-Z0-9]{6,10}\b/.exec(message)?.[0]
+    return id ? { key: 'importDuplicate', id } : { key: 'importDuplicateSome' }
+  }
   return { key: 'importFailed', message }
+}
+
+/** The inline import error, in the UI language (course ids stay as written). */
+export function importErrorText(error: ImportError, s: PanelStrings): string {
+  if ('id' in error) return format(s[error.key], { id: error.id })
+  if ('message' in error) return format(s[error.key], { message: error.message })
+  return s[error.key]
 }
 
 export type ImportResult = { ok: true; record: Map<string, RecordEntry> } | { ok: false; error: ImportError }

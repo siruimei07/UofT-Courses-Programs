@@ -3,10 +3,15 @@ import type { RecordEntry } from '../src/app/store'
 import type { GraphCourse } from '../src/data/schema'
 import type { CourseEngine } from '../src/domain/engine-types'
 import type { Eligibility } from '../src/graph/types'
+import { format } from '../src/i18n'
 import {
-  cachedEligibility, earnsCredit, exportRecordJson, gradedEntry, gradeText, groupCredits, groupRecord, importRecordText, mapImportError,
-  nextRecordEntry, recordTotals, searchCourses, syncGradeDraft,
+  cachedEligibility, earnsCredit, exportRecordJson, failedGrade, gradedEntry, gradeText, groupCredits, groupRecord, importErrorText,
+  importRecordText, mapImportError, nextRecordEntry, recordMark, recordTotals, searchCourses, syncGradeDraft,
 } from '../src/ui/panels/record'
+import { panelStrings } from '../src/ui/panels/strings'
+
+const en = panelStrings.en
+const zh = panelStrings.zh
 
 const course = (code: string, title: string, credits = 0.5): GraphCourse => ({
   id: `UTM:${code}`, code, title, subject: code.slice(0, 3), level: Number(code[3]) * 100, credits,
@@ -66,6 +71,59 @@ describe('record grouping and credits', () => {
   })
 })
 
+describe('failed attempts (completed below 50)', () => {
+  it('marks a completed course graded below 50 as failed, never as completed', () => {
+    expect(recordMark(undefined)).toBeNull()
+    expect(recordMark({ status: 'completed', grade: 44 })).toBe('failed')
+    expect(recordMark({ status: 'completed', grade: 49.99 })).toBe('failed')
+    expect(recordMark({ status: 'completed', grade: 0 })).toBe('failed')
+    expect(recordMark({ status: 'completed', grade: 50 })).toBe('completed')
+    // A completed course without a grade is a declared pass.
+    expect(recordMark({ status: 'completed' })).toBe('completed')
+    // Only a completed attempt can fail; a retake planned or in progress shows as such.
+    expect(recordMark({ status: 'inProgress', grade: 12 })).toBe('inProgress')
+    expect(recordMark({ status: 'planned' })).toBe('planned')
+  })
+
+  it('gives the grade of a failed attempt only', () => {
+    expect(failedGrade({ status: 'completed', grade: 44 })).toBe(44)
+    expect(failedGrade({ status: 'completed', grade: 44.5 })).toBe(44.5)
+    expect(failedGrade({ status: 'completed', grade: 50 })).toBeNull()
+    expect(failedGrade({ status: 'completed' })).toBeNull()
+    expect(failedGrade({ status: 'planned', grade: 10 })).toBeNull()
+    expect(failedGrade(undefined)).toBeNull()
+  })
+
+  it('agrees with the credit rule', () => {
+    for (const grade of [undefined, 0, 49.5, 50, 88]) {
+      const entry: RecordEntry = grade === undefined ? { status: 'completed' } : { status: 'completed', grade }
+      expect(earnsCredit(entry)).toBe(recordMark(entry) !== 'failed')
+    }
+  })
+
+  it('says it was not passed and may be retaken, in both languages', () => {
+    expect(en.notPassed).toBe('Not passed')
+    expect(zh.notPassed).toBe('未通过')
+    expect(format(en.failedSummary, { status: en.notPassed, grade: '44' })).toBe('Not passed (44%) · no credit · may be retaken')
+    expect(format(zh.failedSummary, { status: zh.notPassed, grade: '44' })).toBe('未通过（44%）· 不计学分 · 可重修')
+    expect(en.failedNote).toMatch(/^Not passed: .*no credit.*retake/)
+    expect(zh.failedNote).toMatch(/^未通过：.*不计学分.*重修/)
+    // The note names the record choices that start a retake, as the control labels them.
+    for (const strings of [en, zh]) {
+      expect(strings.failedNote).toContain(strings.planned)
+      expect(strings.failedNote).toContain(strings.inProgress)
+    }
+  })
+
+  it('drops the failing grade when a retake is planned or started', () => {
+    expect(nextRecordEntry({ status: 'completed', grade: 44 }, 'planned')).toEqual({ status: 'planned' })
+    expect(nextRecordEntry({ status: 'completed', grade: 44 }, 'inProgress')).toEqual({ status: 'inProgress' })
+    // A passing grade typed over the failing one turns the attempt into a pass.
+    expect(gradedEntry({ status: 'completed', grade: 44 }, '72')).toEqual({ status: 'completed', grade: 72 })
+    expect(recordMark({ status: 'completed', grade: 72 })).toBe('completed')
+  })
+})
+
 describe('import and export', () => {
   it('round-trips through the exported JSON', () => {
     const record = new Map<string, RecordEntry>([['UTM:CSC148H5', { status: 'inProgress' }], ['UTM:CSC108H5', { status: 'completed', grade: 88 }]])
@@ -91,7 +149,27 @@ describe('import and export', () => {
     expect(error('{"schemaVersion":1,"courses":[{"status":"completed"}]}')).toEqual({ key: 'importBadId', id: 'undefined' })
     expect(error('{"schemaVersion":1,"courses":[{"id":"UTM:CSC108H5","status":"done"}]}')).toEqual({ key: 'importBadStatus', id: 'UTM:CSC108H5' })
     expect(error('{"schemaVersion":1,"courses":[{"id":"UTM:CSC108H5","status":"completed","grade":101}]}')).toEqual({ key: 'importBadGrade', id: 'UTM:CSC108H5' })
+    expect(error('{"schemaVersion":1,"courses":[{"id":"UTM:CSC108H5","status":"completed","grade":42},{"id":"UTM:CSC108H5","status":"inProgress"}]}'))
+      .toEqual({ key: 'importDuplicate', id: 'UTM:CSC108H5' })
     expect(error(' '.repeat(2_000_001))).toEqual({ key: 'importTooLarge' })
+  })
+
+  it('maps a duplicate course id to a localised message, whatever the wording around the id', () => {
+    expect(mapImportError(new Error('Duplicate course id: UTM:CSC108H5'))).toEqual({ key: 'importDuplicate', id: 'UTM:CSC108H5' })
+    expect(mapImportError(new Error('Duplicate course id UTSG:MAT137Y1 (rows 2 and 5)'))).toEqual({ key: 'importDuplicate', id: 'UTSG:MAT137Y1' })
+    expect(mapImportError(new Error('Duplicate course id'))).toEqual({ key: 'importDuplicateSome' })
+    expect(mapImportError(new Error('Duplicate course ids are not allowed'))).toEqual({ key: 'importDuplicateSome' })
+    expect(importErrorText({ key: 'importDuplicate', id: 'UTM:CSC108H5' }, en)).toBe('UTM:CSC108H5 is listed more than once in this file.')
+    expect(importErrorText({ key: 'importDuplicate', id: 'UTM:CSC108H5' }, zh)).toBe('UTM:CSC108H5 在该文件中出现了不止一次。')
+    expect(importErrorText({ key: 'importDuplicateSome' }, zh)).toBe(zh.importDuplicateSome)
+    // No English from the thrown message reaches the Chinese UI.
+    expect(importErrorText(mapImportError(new Error('Duplicate course id: UTM:CSC108H5')), zh)).not.toMatch(/Duplicate/)
+  })
+
+  it('words every import error in the UI language', () => {
+    expect(importErrorText({ key: 'importBadGrade', id: 'UTM:CSC108H5' }, en)).toBe('Invalid grade for UTM:CSC108H5 (use 0–100)')
+    expect(importErrorText({ key: 'importNotJson' }, zh)).toBe('该文件不是有效的 JSON。')
+    expect(importErrorText({ key: 'importFailed', message: 'disk on fire' }, en)).toBe('Import failed: disk on fire')
   })
 
   it('keeps unknown failures readable', () => {

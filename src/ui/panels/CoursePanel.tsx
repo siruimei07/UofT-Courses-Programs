@@ -7,11 +7,11 @@ import type { GraphCourse, RequirementLite } from '../../data/schema'
 import { loadDetails } from '../../data/load'
 import type { CourseEngine, CourseEvaluation, EvalNode } from '../../domain/engine-types'
 import { format, formatNumber, useLang, useStrings } from '../../i18n'
-import { CourseChip, ChipList } from './CourseChip'
+import { CourseChip, ChipList, RecordGlyph } from './CourseChip'
 import { PanelContext, useCampusData, usePanelEnv } from './context'
 import { capList, codeOf, coursePageUrl, creditsText, levelText, parseGrade, plural, pushRecent } from './format'
 import { Disclosure, ExternalLink, LoadError, OfficialText, PanelEnvProvider, Readout, Segmented, Skeleton, SourceFooter, Template } from './parts'
-import { gradedEntry, gradeText, nextRecordEntry, syncGradeDraft, type RecordChoice } from './record'
+import { failedGrade, gradedEntry, gradeText, nextRecordEntry, recordMark, syncGradeDraft, type RecordChoice } from './record'
 import { RuleTree } from './RuleTree'
 import { panelStrings, type PanelStrings } from './strings'
 import {
@@ -218,6 +218,7 @@ function RecordControl({ course }: { course: GraphCourse }) {
     setDraft(syncGradeDraft(draft, stored))
   }
   const parsed = parseGrade(draft)
+  const failed = recordMark(entry) === 'failed'
   const options: { value: RecordChoice; label: string }[] = [
     { value: 'none', label: s.notTaken },
     { value: 'planned', label: s.planned },
@@ -229,6 +230,8 @@ function RecordControl({ course }: { course: GraphCourse }) {
     write(course.id, gradedEntry(entry, text))
   }
   const gradeId = `rp-grade-${course.code}`
+  const failedId = `${gradeId}-failed`
+  const describedBy = [parsed === 'invalid' ? `${gradeId}-error` : null, failed ? failedId : null].filter(Boolean).join(' ')
   return (
     <div className="rp-record">
       <Segmented
@@ -237,6 +240,7 @@ function RecordControl({ course }: { course: GraphCourse }) {
         value={entry?.status ?? 'none'}
         onChange={choice => write(course.id, nextRecordEntry(entry, choice))}
         label={format(s.recordControl, { code: course.code })}
+        describedBy={failed ? failedId : undefined}
       />
       {entry?.status === 'completed' ? (
         <div className="rp-grade">
@@ -250,12 +254,19 @@ function RecordControl({ course }: { course: GraphCourse }) {
             maxLength={6}
             value={draft}
             aria-invalid={parsed === 'invalid'}
-            aria-describedby={parsed === 'invalid' ? `${gradeId}-error` : undefined}
+            aria-describedby={describedBy || undefined}
             onChange={event => onGrade(event.target.value)}
           />
           <span aria-hidden="true">%</span>
           {parsed === 'invalid' ? <span id={`${gradeId}-error`} className="rp-field-error">{s.gradeInvalid}</span> : null}
         </div>
+      ) : null}
+      {/* Completed below 50 (UTM Calendar F): not passed, no credit, may be retaken. */}
+      {failed ? (
+        <p id={failedId} className="rp-failed-note">
+          <RecordGlyph status="failed" />
+          <span>{s.failedNote}</span>
+        </p>
       ) : null}
     </div>
   )
@@ -287,7 +298,8 @@ const NO_NEEDS: NeedsReadout = { kind: 'none' }
 function ChainSummary({ course, chain }: { course: GraphCourse; chain: Chain }) {
   const s = useStrings(panelStrings)
   const lang = useLang()
-  const { topology } = usePanelEnv()
+  const { topology, record } = usePanelEnv()
+  const failed = failedGrade(record.get(course.id))
   const [needsOpen, setNeedsOpen] = useState(true)
   const [unlocksOpen, setUnlocksOpen] = useState(true)
   const n = (value: number) => formatNumber(value, lang)
@@ -311,6 +323,7 @@ function ChainSummary({ course, chain }: { course: GraphCourse; chain: Chain }) 
 
   return (
     <section className="rp-summary" aria-label={course.code}>
+      {failed !== null ? <FailedRow grade={failed} /> : null}
       <ChainRow
         tone="pre"
         open={needsOpen}
@@ -337,6 +350,25 @@ function ChainSummary({ course, chain }: { course: GraphCourse; chain: Chain }) 
         ]}
       />
     </section>
+  )
+}
+
+/** First summary row for a failed attempt: "Not passed (44%) · no credit · may be retaken". */
+function FailedRow({ grade }: { grade: number }) {
+  const s = useStrings(panelStrings)
+  const lang = useLang()
+  return (
+    <p className="rp-chain-row rp-chain-row-static rp-failed-row">
+      <span className="rp-readout">
+        <RecordGlyph status="failed" size={10} />
+        <span>
+          <Template
+            template={s.failedSummary}
+            slots={{ status: <b className="rp-failed-label">{s.notPassed}</b>, grade: <span className="rp-num-tab">{formatNumber(grade, lang)}</span> }}
+          />
+        </span>
+      </span>
+    </p>
   )
 }
 

@@ -129,12 +129,14 @@ export interface SegmentOption<T extends string> {
 }
 
 /** Segmented control (role radiogroup) with arrow-key movement, design-spec 6.2 / 11.1. */
-export function Segmented<T extends string>({ options, value, onChange, label, className }: {
+export function Segmented<T extends string>({ options, value, onChange, label, className, describedBy }: {
   options: readonly SegmentOption<T>[]
   value: T
   onChange(value: T): void
   label: string
   className?: string
+  /** Id of a note that explains the current value (a failed course). */
+  describedBy?: string
 }) {
   const refs = useRef<(HTMLButtonElement | null)[]>([])
   const onKeyDown = (event: KeyboardEvent, index: number) => {
@@ -146,7 +148,7 @@ export function Segmented<T extends string>({ options, value, onChange, label, c
     refs.current[next]?.focus()
   }
   return (
-    <div className={className ? `rp-seg ${className}` : 'rp-seg'} role="radiogroup" aria-label={label}>
+    <div className={className ? `rp-seg ${className}` : 'rp-seg'} role="radiogroup" aria-label={label} aria-describedby={describedBy}>
       {options.map((option, i) => (
         <button
           key={option.value}

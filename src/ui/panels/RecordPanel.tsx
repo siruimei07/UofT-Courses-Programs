@@ -9,10 +9,10 @@ import { PanelContext, usePanelEnv } from './context'
 import { campusOf, coursesText, creditsText, plural } from './format'
 import { PanelEnvProvider } from './parts'
 import {
-  exportRecordJson, groupRecord, importRecordText, MAX_IMPORT_BYTES, nextRecordEntry, RECORD_FILE_NAME, recordTotals, searchCourses,
-  STATUS_ORDER, type ImportError, type RecordRow,
+  exportRecordJson, groupRecord, importErrorText, importRecordText, MAX_IMPORT_BYTES, nextRecordEntry, RECORD_FILE_NAME, recordMark, recordTotals,
+  searchCourses, STATUS_ORDER, type ImportError, type RecordRow,
 } from './record'
-import { panelStrings, type PanelStrings } from './strings'
+import { panelStrings } from './strings'
 import type { PanelProps } from './types'
 
 export function RecordPanel(props: PanelProps) {
@@ -97,13 +97,13 @@ function AddCourse() {
           results.length ? (
             <ul className="rp-results">
               {results.map(course => {
-                const entry = record.get(course.id)
+                const mark = recordMark(record.get(course.id))
                 return (
                   <li key={course.id}>
                     <button type="button" className="rp-result" onClick={() => add(course.id)}>
                       <span className="rp-result-code" lang="en">{course.code}</span>
                       <span className="rp-result-title" lang="en">{course.title}</span>
-                      {entry ? <span className="rp-result-state">{format(s.onRecord, { status: s[RECORD_LABEL[entry.status]] })}</span> : null}
+                      {mark ? <span className="rp-result-state">{format(s.onRecord, { status: s[RECORD_LABEL[mark]] })}</span> : null}
                     </button>
                   </li>
                 )
@@ -148,10 +148,13 @@ function RecordRowView({ row }: { row: RecordRow }) {
   }
   const statusLabel = format(s.changeStatus, { code: row.code })
   const removeLabel = format(s.remove, { code: row.code })
+  // A failed attempt stays in the Completed group (its status) but is marked as not passed.
+  const mark = recordMark(row.entry)
+  const failed = mark === 'failed'
   return (
     <li className="rp-rrow">
       <span className="rp-status-menu" title={statusLabel}>
-        <RecordGlyph status={row.entry.status} />
+        <RecordGlyph status={mark} />
         <svg className="rp-menu-caret" width="8" height="8" viewBox="0 0 8 8" aria-hidden="true" focusable="false">
           <path d="M1.5 3 4 5.5 6.5 3" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
         </svg>
@@ -170,7 +173,12 @@ function RecordRowView({ row }: { row: RecordRow }) {
           <span className="rp-rrow-title">{missingLabel}</span>
         </span>
       )}
-      {row.entry.grade !== undefined ? <span className="rp-rrow-grade">{row.entry.grade}%</span> : null}
+      {row.entry.grade !== undefined ? (
+        <span className={failed ? 'rp-rrow-grade rp-rrow-failed' : 'rp-rrow-grade'} title={failed ? s.notPassed : undefined}>
+          {row.entry.grade}%
+          {failed ? <span className="rp-sr">{s.srSep}{s.notPassed}</span> : null}
+        </span>
+      ) : null}
       <button type="button" className="rp-icon-btn" aria-label={removeLabel} title={removeLabel} onClick={() => actions.setRecord(row.id, null)}>
         <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true" focusable="false">
           <path d="M3 3 9 9M9 3 3 9" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
@@ -186,12 +194,6 @@ type Message = { kind: 'ok'; count: number; file: string } | { kind: 'error'; er
 interface PendingImport {
   record: Map<string, RecordEntry>
   file: string
-}
-
-function errorText(error: ImportError, s: PanelStrings): string {
-  if ('id' in error) return format(s[error.key], { id: error.id })
-  if ('message' in error) return format(s[error.key], { message: error.message })
-  return s[error.key]
 }
 
 function download(text: string, fileName: string): void {
@@ -315,7 +317,7 @@ function RecordActions({ count }: { count: number }) {
       )}
       {message ? (
         message.kind === 'error'
-          ? <p className="rp-danger" role="alert">{errorText(message.error, s)}</p>
+          ? <p className="rp-danger" role="alert">{importErrorText(message.error, s)}</p>
           : <p className="rp-ok" role="status">{format(s.importDone, { courses: coursesText(message.count, lang, s), file: message.file })}</p>
       ) : null}
     </div>

@@ -42,6 +42,12 @@ export function RightPanel(outer: PanelProps) {
   if (panel && panel !== lastTab) setLastTab(panel)
   const tab = panel ?? lastTab
 
+  // Motion (design-spec 17): once the panel has been collapsed, every expand from the rail fades
+  // the card content in (CSS, re-run each time the card is shown). First paint and tab switches
+  // never animate; prefers-reduced-motion turns the fade off.
+  const [fadeOnExpand, setFadeOnExpand] = useState(collapsed)
+  if (collapsed && !fadeOnExpand) setFadeOnExpand(true)
+
   // Program data is lazy: mount the Program and My courses tabs on first visit, then keep them.
   const [visited, setVisited] = useState<ReadonlySet<Tab>>(() => new Set<Tab>(['course', tab]))
   if (!collapsed && !visited.has(tab)) setVisited(new Set([...visited, tab]))
@@ -145,47 +151,49 @@ export function RightPanel(outer: PanelProps) {
             })}
           </nav>
         ) : null}
-        <div className="rp-card" hidden={collapsed}>
-          <div className="rp-tabs">
-            <div className="rp-tablist" role="tablist" aria-label={s.tabsLabel}>
-              {TABS.map((t, i) => (
-                <button
-                  key={t}
-                  ref={element => { tabRefs.current[t] = element }}
-                  type="button"
-                  role="tab"
-                  id={`rp-tab-${t}`}
-                  aria-selected={t === tab}
-                  aria-controls={`rp-tabpanel-${t}`}
-                  tabIndex={t === tab ? 0 : -1}
-                  className="rp-tab"
-                  onClick={() => open(t)}
-                  onKeyDown={event => onTabKey(event, i)}
-                >
-                  {tabLabel(t)}
-                </button>
-              ))}
+        <div className="rp-card" hidden={collapsed} data-motion={fadeOnExpand ? 'enter' : undefined}>
+          <div className="rp-card-inner">
+            <div className="rp-tabs">
+              <div className="rp-tablist" role="tablist" aria-label={s.tabsLabel}>
+                {TABS.map((t, i) => (
+                  <button
+                    key={t}
+                    ref={element => { tabRefs.current[t] = element }}
+                    type="button"
+                    role="tab"
+                    id={`rp-tab-${t}`}
+                    aria-selected={t === tab}
+                    aria-controls={`rp-tabpanel-${t}`}
+                    tabIndex={t === tab ? 0 : -1}
+                    className="rp-tab"
+                    onClick={() => open(t)}
+                    onKeyDown={event => onTabKey(event, i)}
+                  >
+                    {tabLabel(t)}
+                  </button>
+                ))}
+              </div>
+              <button type="button" className="rp-collapse" aria-label={s.collapse} title={s.collapse} onClick={collapse}>
+                <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true" focusable="false">
+                  <path d="M3 3.5 6.5 7 3 10.5M7.5 3.5 11 7l-3.5 3.5" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              </button>
             </div>
-            <button type="button" className="rp-collapse" aria-label={s.collapse} title={s.collapse} onClick={collapse}>
-              <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true" focusable="false">
-                <path d="M3 3.5 6.5 7 3 10.5M7.5 3.5 11 7l-3.5 3.5" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-              </svg>
-            </button>
+            {TABS.map(t => (
+              <div
+                key={t}
+                ref={element => { bodyRefs.current[t] = element }}
+                role="tabpanel"
+                id={`rp-tabpanel-${t}`}
+                aria-labelledby={`rp-tab-${t}`}
+                className="rp-body"
+                hidden={t !== tab}
+                tabIndex={0}
+              >
+                {visited.has(t) ? panels[t] : null}
+              </div>
+            ))}
           </div>
-          {TABS.map(t => (
-            <div
-              key={t}
-              ref={element => { bodyRefs.current[t] = element }}
-              role="tabpanel"
-              id={`rp-tabpanel-${t}`}
-              aria-labelledby={`rp-tab-${t}`}
-              className="rp-body"
-              hidden={t !== tab}
-              tabIndex={0}
-            >
-              {visited.has(t) ? panels[t] : null}
-            </div>
-          ))}
         </div>
       </aside>
     </PanelEnvProvider>
