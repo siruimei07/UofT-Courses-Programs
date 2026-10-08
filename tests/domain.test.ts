@@ -3,9 +3,9 @@
 import { readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { containsOpaque, recordFromRows, ruleCourseIds } from '../src/domain'
+import { containsOpaque, isPriorityOnly, recordFromRows, ruleCourseIds } from '../src/domain'
 import type { RecordEntryLike, Rule } from '../src/domain'
-import { combine, createEvalContext, evaluateRule, usedCourses, type Counting, type RuleIndex } from '../src/domain/evaluate'
+import { claimDisjoint, combine, createEvalContext, evaluateRule, type Counting, type RuleIndex } from '../src/domain/evaluate'
 
 const id = (code: string) => (code.includes(':') ? code : `UTM:${code}`)
 const course = (code: string): Rule => ({ kind: 'course', courseId: id(code) })
@@ -13,6 +13,7 @@ const minGrade = (code: string, minimum: number): Rule => ({ kind: 'minGrade', c
 const all = (...items: Rule[]): Rule => ({ kind: 'all', items })
 const any = (...items: Rule[]): Rule => ({ kind: 'any', items })
 const unknown = (text = 'Unparsed wording'): Rule => ({ kind: 'unknown', text, reason: 'test' })
+const ids = (...codes: string[]) => codes.map(id)
 
 // TST = subject, digit 1-4 = level, H/Y = half/full credit.
 const CODES = ['TST100H5', 'TST101H5', 'TST102Y5', 'TST200H5', 'TST201H5', 'TST300H5', 'OTH100H5', 'OTH300Y5']
@@ -122,6 +123,18 @@ describe('course and grade leaves', () => {
     const met = evaluateRule(rule, createEvalContext(index(), record(['TST100H5', 'completed'])), 'current')
     expect(met).toEqual({ kind: 'applicability', status: 'met', text: 'For students entering in 2027-28', children: [{ kind: 'course', status: 'met', courseId: 'UTM:TST100H5' }] })
     expect(status(rule, [])).toBe('unknown')
+    expect(status(all(rule, course('TST101H5')), [['TST100H5', 'completed'], ['TST101H5', 'completed']])).toBe('met')
+  })
+
+  it('never lets a cohort clause inside an OR decide the OR on its own (the branch may not apply)', () => {
+    const cohort: Rule = { kind: 'applicability', cohort: 'For students entering in 2027-28', rule: course('TST100H5') }
+    const rule = any(cohort, course('TST101H5'))
+    const node = evaluateRule(rule, createEvalContext(index(), record(['TST100H5', 'completed'])), 'current')
+    expect(node.status).toBe('unknown')
+    expect(node.children?.[0]).toMatchObject({ kind: 'applicability', status: 'unknown', children: [{ status: 'met' }] })
+    // A branch whose rule fails cannot help, whether or not it applies.
+    expect(status(rule, [])).toBe('unmet')
+    expect(status(rule, [['TST101H5', 'completed']])).toBe('met')
   })
 })
 
@@ -166,6 +179,16 @@ describe('credits', () => {
     expect(status(credits(0.5, { courseIds: [id('TST100H5'), id('TST101H5')] }), rows, 'current', pairs)).toBe('met')
   })
 
+  it('confirms only the smallest credit of courses that exclude each other (a lower bound)', () => {
+    const rows: Row[] = [['TST100H5', 'completed'], ['TST102Y5', 'completed']]
+    const pairs: [string, string][] = [['TST100H5', 'TST102Y5']]
+    expect(earned(credits(1), rows, 'current', pairs)).toBe(0.5)
+    // Either course may be the one that keeps its credit, so 1.0 is possible but not certain.
+    expect(status(credits(1), rows, 'current', pairs)).toBe('unknown')
+    expect(status(credits(0.5), rows, 'current', pairs)).toBe('met')
+    expect(status(credits(2), rows, 'current', pairs)).toBe('unmet')
+  })
+
   it('reads credit values of courses outside the dataset from their code', () => {
     expect(status(credits(1, { courseIds: [id('UTSG:ABC100Y1')] }), [['UTSG:ABC100Y1', 'completed']])).toBe('met')
     expect(status(credits(1), [['UTSG:ABC100H1', 'completed'], ['TST100H5', 'completed']])).toBe('met')
@@ -176,13 +199,30 @@ describe('credits', () => {
   })
 })
 
-describe('courses that satisfy a met requirement', () => {
-  it('uses the first met option of an OR, every child of an AND and the counted credits', () => {
-    const ctx = createEvalContext(index(), record(['TST100H5', 'completed'], ['TST101H5', 'completed'], ['TST200H5', 'completed']))
-    expect(usedCourses(evaluateRule(any(course('TST300H5'), course('TST101H5'), course('TST100H5')), ctx, 'completed'), ctx)).toEqual([id('TST101H5')])
-    expect(usedCourses(evaluateRule(all(course('TST100H5'), course('TST200H5')), ctx, 'completed'), ctx)).toEqual([id('TST100H5'), id('TST200H5')])
-    expect(usedCourses(evaluateRule({ kind: 'credits', minimum: 0.5, subject: 'TST', level: 200 }, ctx, 'completed'), ctx)).toEqual([id('TST200H5')])
-    expect(usedCourses(evaluateRule(course('TST300H5'), ctx, 'completed'), ctx)).toEqual([])
+describe('courses that satisfy met requirements without sharing', () => {
+  const ctx = createEvalContext(index(), record(['TST100H5', 'completed'], ['TST101H5', 'completed'], ['TST200H5', 'completed'], ['TST102Y5', 'completed']))
+  const claim = (...rules: Rule[]) => claimDisjoint(rules.map(rule => evaluateRule(rule, ctx, 'completed')), ctx)
+  const credits = (minimum: number, codes: string[]): Rule => ({ kind: 'credits', minimum, courseIds: codes.map(id) })
+
+  it('uses the first met option of an OR, every child of an AND and only the credits needed', () => {
+    expect(claim(any(course('TST300H5'), course('TST101H5'), course('TST100H5')))).toEqual(ids('TST101H5'))
+    expect(claim(all(course('TST100H5'), course('TST200H5')))).toEqual(ids('TST100H5', 'TST200H5'))
+    expect(claim({ kind: 'credits', minimum: 0.5, subject: 'TST', level: 200 })).toEqual(ids('TST200H5'))
+    // Smallest credit values first, and no more than the minimum needs.
+    expect(claim(credits(1, ['TST102Y5', 'TST100H5', 'TST101H5']))).toEqual(ids('TST100H5', 'TST101H5'))
+    expect(claim(course('TST300H5'))).toEqual([])
+  })
+
+  it('finds a split where a credit pool or an OR would otherwise take a course another group needs', () => {
+    expect(claim(credits(0.5, ['TST100H5', 'TST101H5']), course('TST100H5'))?.sort()).toEqual(ids('TST100H5', 'TST101H5'))
+    expect(claim(credits(0.5, ['TST101H5', 'TST100H5']), course('TST101H5'))?.sort()).toEqual(ids('TST100H5', 'TST101H5'))
+    expect(claim(any(course('TST100H5'), course('TST101H5')), course('TST100H5'))?.sort()).toEqual(ids('TST100H5', 'TST101H5'))
+  })
+
+  it('reports no split when one course must serve two groups', () => {
+    expect(claim(course('TST100H5'), course('TST100H5'))).toBeNull()
+    expect(claim(credits(0.5, ['TST100H5']), course('TST100H5'))).toBeNull()
+    expect(claim(credits(1, ['TST100H5', 'TST101H5']), any(course('TST100H5'), course('TST101H5')))).toBeNull()
   })
 })
 
@@ -199,6 +239,34 @@ describe('rule helpers', () => {
     expect(containsOpaque(any(course('TST100H5'), { kind: 'permission', text: 'p' }))).toBe(true)
     expect(containsOpaque({ kind: 'applicability', cohort: 'x', rule: course('TST100H5') })).toBe(false)
     expect(containsOpaque({ kind: 'credits', minimum: 1 })).toBe(false)
+  })
+})
+
+describe('enrolment-priority restrictions (spec 19.9)', () => {
+  it.each([
+    'Priority is given to students enrolled in Computer Science Specialist, Information Security Specialist, Bioinformatics Specialist or Computer Science Major programs.',
+    'Priority given first to Forensic Science Specialists and Majors; then Minors.',
+    'Priority is given to FSC Specialists, FSC Majors and FSC Minors',
+    'Priorty given to FSC Specialists, Majors and then Minors.',
+    'English Specialists have priority for registration, followed by English Majors.',
+    'Please note that preference will be given to students enrolled in the Minor in Business, Science & Entrepreneurship.',
+    'Enrolment priority is given to students in year 2. Priority given next to students in year 3.',
+    'Priority is given to students enrolled in Mathematical Sciences and Applied Statistics Specialist or Major programs; Astronomical Sciences Specialist (ERSPE1025), Astronomy Major (ERMAJ2204).',
+  ])('treats a text of priority statements only as an enrolment note: %s', text => {
+    expect(isPriorityOnly(text)).toBe(true)
+  })
+
+  it.each([
+    'Restricted to students enrolled in Applied Statistics Specialist or Major programs.',
+    'Priority given to Forensic Science Specialists and Majors. Limited Enrolment.',
+    'Restricted to students enrolled in a Forensic Science Specialist program. Priority consideration for external placements will be given to students who hold a CGPA of 3.0 or higher.',
+    'Limited enrolment. The course is open only to students in the MAT major/specialist programs, with priority to students in the specialist program.',
+    'Priority is given to students in the Major; others require permission of the department.',
+    'This course is open to first-year students only.',
+    '44',
+    '',
+  ])('keeps any other restriction a real restriction: %s', text => {
+    expect(isPriorityOnly(text)).toBe(false)
   })
 })
 
@@ -232,9 +300,10 @@ const CJK = new RegExp(`[${[[0x3000, 0x303f], [0x3400, 0x9fff], [0xff00, 0xffef]
 
 describe('domain module hygiene', () => {
   it('contains no hard-coded Chinese text (the UI owns every string)', () => {
-    const dir = join('src', 'domain')
-    for (const file of readdirSync(dir)) {
-      expect(readFileSync(join(dir, file), 'utf8').match(CJK), file).toBeNull()
-    }
+    const files = readdirSync(join('src', 'domain'), { recursive: true, withFileTypes: true })
+      .filter(entry => entry.isFile())
+      .map(entry => join(entry.parentPath, entry.name))
+    expect(files.length).toBeGreaterThan(5)
+    for (const file of files) expect(readFileSync(file, 'utf8').match(CJK), file).toBeNull()
   })
 })

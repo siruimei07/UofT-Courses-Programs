@@ -37,8 +37,8 @@ export interface EvalContext {
   index: RuleIndex
   record: StudentRecord
   pools: Partial<Record<Counting, CreditEntry[]>>
-  /** Credits nodes → the course ids counted as earned (program overlap checks). */
-  creditUse: WeakMap<EvalNode, string[]>
+  /** Credits nodes → the records whose credits certainly count towards them (program overlap checks). */
+  creditUse: WeakMap<EvalNode, CreditEntry[]>
 }
 
 export function createEvalContext(index: RuleIndex, record: StudentRecord): EvalContext {
@@ -104,9 +104,10 @@ function creditPool(ctx: EvalContext, counting: Counting): CreditEntry[] {
 
 /**
  * Credits earned towards a minimum, each course counted once. Courses that exclude each other
- * never both count, so each exclusion-connected group contributes only its largest credit value
- * to the confirmed total (a lower bound). Courses outside the dataset count when the rule lists
- * them or has no scope; under a subject or level scope they stay uncertain.
+ * never both count, and which one keeps the credit is not known, so each exclusion-connected
+ * group contributes only its smallest credit value to the confirmed total (a lower bound); the
+ * upper bound counts every course. Courses outside the dataset count when the rule lists them or
+ * has no scope; under a subject or level scope they stay uncertain.
  */
 function evaluateCredits(rule: Extract<Rule, { kind: 'credits' }>, ctx: EvalContext, counting: Counting) {
   const listed = rule.courseIds ? new Set(rule.courseIds) : undefined
@@ -137,25 +138,37 @@ function evaluateCredits(rule: Extract<Rule, { kind: 'credits' }>, ctx: EvalCont
       if (j !== i && peers.has(certain[j].id)) component[root(j)] = root(i)
     }
   }
-  const largest = new Map<number, number>()
+  const smallest = new Map<number, number>()
   let potential = uncertainCredits
   certain.forEach((entry, i) => {
     const r = root(i)
-    largest.set(r, Math.max(largest.get(r) ?? 0, entry.credits))
+    smallest.set(r, Math.min(smallest.get(r) ?? Number.POSITIVE_INFINITY, entry.credits))
     potential += entry.credits
   })
   let earned = 0
-  for (const credits of largest.values()) earned += credits
+  for (const credits of smallest.values()) earned += credits
   const status: Eligibility = earned + EPSILON >= rule.minimum ? 'met'
     : unknownAmount || potential + EPSILON >= rule.minimum ? 'unknown' : 'unmet'
-  return { status, earned, used: certain.map(entry => entry.id) }
+  return { status, earned, certain }
 }
 
-export function evaluateRule(rule: Rule, ctx: EvalContext, counting: Counting): EvalNode {
+/**
+ * A cohort clause ("For students entering in 2027-28: …") cannot be checked: the record has no
+ * cohort. Where the clause stands alone or inside an AND, a clause that does not apply holds
+ * vacuously, so a met rule is met either way and anything else is unknown. Inside an OR, a clause
+ * that does not apply is no option at all, so a met rule only makes the branch unknown, while an
+ * unmet rule fails either way.
+ */
+function applicabilityStatus(inner: Eligibility, inAny: boolean): Eligibility {
+  if (inAny) return inner === 'met' ? 'unknown' : inner
+  return inner === 'met' ? 'met' : 'unknown'
+}
+
+function evaluateNode(rule: Rule, ctx: EvalContext, counting: Counting, inAny: boolean): EvalNode {
   switch (rule.kind) {
     case 'true': return { kind: 'true', status: 'met' }
     case 'all': case 'any': {
-      const children = rule.items.map(item => evaluateRule(item, ctx, counting))
+      const children = rule.items.map(item => evaluateNode(item, ctx, counting, rule.kind === 'any'))
       return { kind: rule.kind, status: combine(rule.kind, children.map(child => child.status)), children }
     }
     case 'course':
@@ -166,37 +179,104 @@ export function evaluateRule(rule: Rule, ctx: EvalContext, counting: Counting): 
         courseId: rule.courseId, minimum: rule.minimum,
       }
     case 'credits': {
-      const { status, earned, used } = evaluateCredits(rule, ctx, counting)
+      const { status, earned, certain } = evaluateCredits(rule, ctx, counting)
       const node: EvalNode = { kind: 'credits', status, minimum: rule.minimum, earned }
-      ctx.creditUse.set(node, used)
+      ctx.creditUse.set(node, certain)
       return node
     }
     case 'permission': return { kind: 'permission', status: 'unknown', text: rule.text }
     case 'program': return { kind: 'program', status: 'unknown', text: rule.programId }
     case 'unknown': return { kind: 'unknown', status: 'unknown', text: rule.text }
     case 'applicability': {
-      const inner = evaluateRule(rule.rule, ctx, counting)
-      // The record carries no cohort. A met clause holds either way (it applies and is met, or it
-      // does not apply); otherwise it depends on whether the student belongs to the cohort.
-      return { kind: 'applicability', status: inner.status === 'met' ? 'met' : 'unknown', text: rule.cohort, children: [inner] }
+      const inner = evaluateNode(rule.rule, ctx, counting, false)
+      return { kind: 'applicability', status: applicabilityStatus(inner.status, inAny), text: rule.cohort, children: [inner] }
     }
   }
 }
 
+export function evaluateRule(rule: Rule, ctx: EvalContext, counting: Counting): EvalNode {
+  return evaluateNode(rule, ctx, counting, false)
+}
+
 /**
- * Courses that actually satisfy a met node: every child of `all`, the first met option of `any`,
- * the counted records of `credits`. Empty for nodes that are not met.
+ * Picks the records a met credits node uses: smallest credit values first, skipping courses
+ * already claimed and courses excluded by one already picked, until the minimum is reached.
+ * Null when the remaining records cannot reach it.
  */
-export function usedCourses(node: EvalNode, ctx: EvalContext): string[] {
-  if (node.status !== 'met') return []
-  switch (node.kind) {
-    case 'course': case 'minGrade': return node.courseId ? [node.courseId] : []
-    case 'credits': return ctx.creditUse.get(node) ?? []
-    case 'all': case 'applicability': return (node.children ?? []).flatMap(child => usedCourses(child, ctx))
-    case 'any': {
-      const first = node.children?.find(child => child.status === 'met')
-      return first ? usedCourses(first, ctx) : []
-    }
-    default: return []
+function pickCredits(node: EvalNode, ctx: EvalContext, claimed: ReadonlySet<string>): string[] | null {
+  const minimum = node.minimum ?? 0
+  const entries = (ctx.creditUse.get(node) ?? []).filter(entry => !claimed.has(entry.id)).sort((a, b) => a.credits - b.credits)
+  const picked: string[] = []
+  let total = 0
+  for (const entry of entries) {
+    if (total + EPSILON >= minimum) break
+    const peers = ctx.index.exclusionPeers.get(entry.id)
+    if (peers && picked.some(id => peers.has(id))) continue
+    picked.push(entry.id)
+    total += entry.credits
   }
+  return total + EPSILON >= minimum ? picked : null
+}
+
+/**
+ * Claims the course leaves of a met node (every child of `all`). Credits nodes are deferred to
+ * `credits`; `any` nodes are deferred to `choices` when given, otherwise decided on the spot.
+ * False when a course is already claimed.
+ */
+function walk(node: EvalNode, claimed: Set<string>, choices: EvalNode[] | null, credits: EvalNode[]): boolean {
+  if (node.status !== 'met') return true
+  switch (node.kind) {
+    case 'course': case 'minGrade':
+      if (!node.courseId) return true
+      if (claimed.has(node.courseId)) return false
+      claimed.add(node.courseId)
+      return true
+    case 'credits':
+      credits.push(node)
+      return true
+    case 'all': case 'applicability':
+      return (node.children ?? []).every(child => walk(child, claimed, choices, credits))
+    case 'any':
+      if (choices) {
+        choices.push(node)
+        return true
+      }
+      return choose(node, claimed, credits)
+    default: return true
+  }
+}
+
+/** Takes the first met option of an OR whose courses are not claimed yet. */
+function choose(node: EvalNode, claimed: Set<string>, credits: EvalNode[]): boolean {
+  for (const child of node.children ?? []) {
+    if (child.status !== 'met') continue
+    const trial = new Set(claimed)
+    const trialCredits: EvalNode[] = []
+    if (!walk(child, trial, null, trialCredits)) continue
+    trial.forEach(id => claimed.add(id))
+    credits.push(...trialCredits)
+    return true
+  }
+  return false
+}
+
+/**
+ * Finds courses that satisfy every one of several met nodes with no course used twice (program
+ * groups share no course unless the calendar says so). Required courses are claimed first, then
+ * the options of each OR, then credit amounts from the records left. Returns the courses used,
+ * or null when this greedy search finds no disjoint assignment (the caller then reports unknown,
+ * never a false "met").
+ */
+export function claimDisjoint(nodes: readonly EvalNode[], ctx: EvalContext): string[] | null {
+  const claimed = new Set<string>()
+  const choices: EvalNode[] = []
+  const credits: EvalNode[] = []
+  if (!nodes.every(node => walk(node, claimed, choices, credits))) return null
+  if (!choices.every(node => choose(node, claimed, credits))) return null
+  for (const node of credits) {
+    const picked = pickCredits(node, ctx, claimed)
+    if (!picked) return null
+    picked.forEach(id => claimed.add(id))
+  }
+  return [...claimed]
 }

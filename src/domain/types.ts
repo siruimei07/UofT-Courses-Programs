@@ -58,6 +58,8 @@ export interface Program {
   code: string
   title: string
   type: string
+  /** 'url-slug' when the calendar gives no POSt code and `code` is the page slug. */
+  codeSource?: 'url-slug'
   description: string
   sourceUrl: string
   contentHash: string

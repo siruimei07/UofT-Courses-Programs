@@ -2,7 +2,7 @@
 import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import type { ProgramLite } from '../src/data/schema'
-import { createEngine } from '../src/domain'
+import { createEngine, isPriorityOnly } from '../src/domain'
 import type { Catalog, EvalNode, RecordEntryLike, Rule } from '../src/domain'
 import { datasetFromCatalog } from './helpers/dataset'
 
@@ -86,12 +86,24 @@ describe('current official Calendar integration', () => {
     const rows = record(['CSC108H5', 'completed', 82], ['MAT102H5', 'completed'], ['CSC148H5', 'inProgress'], ['STA107H5', 'planned'])
     const eligibility = engine.eligibility(rows)
     expect(eligibility.size).toBe(dataset.courses.length - 3)
+    const restrictions = { met: 0, unknown: 0 }
     for (const course of dataset.courses) {
       const result = engine.evaluateCourse(course.id, rows)
       if (eligibility.has(course.id)) expect(result.overall, course.id).toBe(eligibility.get(course.id))
       if (course.prereq) expect(mirrors(course.prereq.rule, result.prerequisites!), course.id).toBe(true)
       if (course.coreq) expect(mirrors(course.coreq.rule, result.corequisites!), course.id).toBe(true)
-      expect(result.restrictions?.status ?? 'unknown').toBe('unknown')
+      if (!course.restriction) {
+        expect(result.restrictions, course.id).toBeNull()
+        continue
+      }
+      // Enrolment-priority notes are met (spec 19.9); every other restriction stays unknown.
+      const note = isPriorityOnly(course.restriction.text)
+      expect(result.restrictions, course.id).toEqual(note
+        ? { kind: 'true', status: 'met', text: course.restriction.text }
+        : { kind: 'unknown', status: 'unknown', text: course.restriction.text })
+      restrictions[note ? 'met' : 'unknown']++
     }
+    expect(restrictions.met).toBeGreaterThan(100)
+    expect(restrictions.unknown).toBeGreaterThan(50)
   })
 })

@@ -2,6 +2,7 @@
 export * from './types'
 export * from './rules'
 export * from './record'
+export { isPriorityOnly } from './restrictions'
 export { createEngine, NEXT_COURSES_LIMIT } from './engine'
 export { PASS_GRADE } from './evaluate'
 export type {

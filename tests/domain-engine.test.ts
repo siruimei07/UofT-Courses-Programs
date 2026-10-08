@@ -1,7 +1,7 @@
 // createEngine (src/domain/engine.ts) against the contract in src/domain/engine-types.ts.
 // Synthetic datasets use TST codes; the performance budget runs on the real UTM dataset.
 import { describe, expect, it } from 'vitest'
-import type { GraphCourse, GraphDataset, ProgramGroupLite, ProgramLite } from '../src/data/schema'
+import type { GraphCourse, GraphDataset, ProgramGroupLite, ProgramLite, RequirementLite } from '../src/data/schema'
 import { createEngine, NEXT_COURSES_LIMIT, ruleCourseIds } from '../src/domain'
 import type { RecordEntryLike, Rule } from '../src/domain'
 import { loadGraphDataset } from './helpers/dataset'
@@ -11,14 +11,24 @@ const course = (code: string): Rule => ({ kind: 'course', courseId: id(code) })
 const all = (...items: Rule[]): Rule => ({ kind: 'all', items })
 const any = (...items: Rule[]): Rule => ({ kind: 'any', items })
 const unknown = (text = 'Unparsed wording'): Rule => ({ kind: 'unknown', text, reason: 'test' })
-const requirement = (rule: Rule, ids = ruleCourseIds(rule)) => ({ text: 'Official text', rule, ids })
+/** A requirement field; `extra` lists ids cited only by the text, `unresolved` codes absent from the calendar. */
+interface Field {
+  rule: Rule
+  extra?: string[]
+  unresolved?: string[]
+}
+const requirement = (field: Rule | Field): RequirementLite => {
+  const { rule, extra = [], unresolved } = 'kind' in field ? { rule: field } as Field : field
+  return { text: 'Official text', rule, ids: [...ruleCourseIds(rule), ...extra.map(id)], ...(unresolved ? { unresolved: unresolved.map(id) } : {}) }
+}
 
 interface Spec {
   code: string
-  prereq?: Rule
-  coreq?: Rule
-  exclusion?: Rule
-  restriction?: Rule
+  prereq?: Rule | Field
+  coreq?: Rule | Field
+  exclusion?: Rule | Field
+  /** Official restriction wording (the rule is always unparsed). */
+  restriction?: string
 }
 function dataset(specs: Spec[]): GraphDataset {
   const courses = specs.map((spec): GraphCourse => ({
@@ -27,7 +37,7 @@ function dataset(specs: Spec[]): GraphDataset {
     ...(spec.prereq ? { prereq: requirement(spec.prereq) } : {}),
     ...(spec.coreq ? { coreq: requirement(spec.coreq) } : {}),
     ...(spec.exclusion ? { exclusion: requirement(spec.exclusion) } : {}),
-    ...(spec.restriction ? { restriction: { text: 'Not open to students in program X.', rule: spec.restriction, ids: ruleCourseIds(spec.restriction) } } : {}),
+    ...(spec.restriction ? { restriction: { text: spec.restriction, rule: unknown(spec.restriction), ids: [] } } : {}),
   })).sort((a, b) => (a.id < b.id ? -1 : 1))
   return {
     schemaVersion: 1, campus: 'UTM', academicYear: 'synthetic', fetchedAt: '', generatedAt: '',
@@ -39,6 +49,8 @@ interface GroupSpec {
   rule: Rule
   /** Extra ids cited only by the text. */
   textIds?: string[]
+  /** Codes absent from the calendar. */
+  unresolved?: string[]
   category?: ProgramGroupLite['category']
 }
 function program(groups: GroupSpec[]): ProgramLite {
@@ -48,6 +60,7 @@ function program(groups: GroupSpec[]): ProgramLite {
     groups: groups.map((group, i) => ({
       id: `g${i + 1}`, label: `Group ${i + 1}`, category: group.category ?? 'completion', text: 'Official text',
       rule: group.rule, ids: [...ruleCourseIds(group.rule), ...(group.textIds ?? []).map(id)],
+      ...(group.unresolved ? { unresolved: group.unresolved.map(id) } : {}),
     })),
   }
 }
@@ -70,6 +83,15 @@ describe('eligibility', () => {
   it('covers every course that is not completed or in progress, planned ones included', () => {
     const result = engine.eligibility(record(['TST100H5', 'completed'], ['TST101H5', 'inProgress'], ['TST102H5', 'planned']))
     expect([...result.keys()]).toEqual(ids('TST102H5', 'TST200H5', 'TST201H5', 'TST202H5'))
+  })
+
+  it('keeps a failed course in the map: it is not passed and may be retaken', () => {
+    const rows = record(['TST100H5', 'completed'], ['TST200H5', 'completed', 42], ['TST202H5', 'completed', 49])
+    const result = engine.eligibility(rows)
+    expect(result.get(id('TST200H5'))).toBe('met')
+    expect(result.get(id('TST202H5'))).toBe('unmet')
+    expect(result.has(id('TST100H5'))).toBe(false)
+    expect(engine.eligibility(record(['TST200H5', 'completed', 50])).has(id('TST200H5'))).toBe(false)
   })
 
   it('counts an in-progress prerequisite: available once current courses are finished', () => {
@@ -104,8 +126,17 @@ describe('evaluateCourse', () => {
     { code: 'TST100H5' }, { code: 'TST101H5' }, { code: 'TST102H5' },
     { code: 'TST200H5', exclusion: any(course('TST100H5'), course('TST101H5'), course('UTSG:TST200H1')) },
     { code: 'TST201H5', exclusion: any(course('TST100H5'), unknown('Any equivalent course')) },
-    { code: 'TST202H5', prereq: course('TST100H5'), restriction: all(unknown(), course('TST102H5')) },
+    { code: 'TST202H5', prereq: course('TST100H5'), restriction: 'Not open to students in program X.' },
     { code: 'TST203H5', prereq: all(course('TST100H5'), any(course('TST101H5'), course('TST102H5'))), coreq: course('TST102H5') },
+    { code: 'TST204H5', prereq: course('TST100H5'), restriction: 'Priority is given to students enrolled in the Synthetic Major.' },
+    // "TST101H5 (Winter 2025)": a dated special-topics offering, kept unparsed by the pipeline.
+    { code: 'TST300H5', exclusion: { rule: unknown('TST101H5 (Winter 2025)'), extra: ['TST101H5'] } },
+    { code: 'TST301H5', exclusion: { rule: any(course('TST100H5'), unknown('TST102H5 (Fall 2023)')), extra: ['TST102H5'] } },
+    // "TST100H5 or TST190Y5", where TST190Y5 is retired: the parser keeps only TST100H5.
+    { code: 'TST302H5', exclusion: { rule: course('TST100H5'), unresolved: ['TST190Y5'] } },
+    { code: 'TST303H5', exclusion: { rule: { kind: 'true' }, unresolved: ['TST190Y5'] } },
+    { code: 'TST304H5', exclusion: any(all(course('TST100H5'), course('TST101H5')), course('TST102H5')) },
+    { code: 'TST305H5', prereq: { rule: course('TST101H5'), unresolved: ['TST190Y5'] }, coreq: { rule: course('TST102H5'), unresolved: ['TST191H5'] } },
   ])
   const engine = createEngine(data)
 
@@ -153,6 +184,52 @@ describe('evaluateCourse', () => {
     expect(result.restrictions).toEqual({ kind: 'unknown', status: 'unknown', text: 'Not open to students in program X.' })
     expect(result.overall).toBe('unknown')
     expect(engine.evaluateCourse(id('TST202H5'), record(['TST100H5', 'completed'], ['TST102H5', 'completed'])).overall).toBe('unknown')
+  })
+
+  it('reports an enrolment-priority restriction as a met note that never decides eligibility (spec 19.9)', () => {
+    const rows = record(['TST100H5', 'completed'])
+    const result = engine.evaluateCourse(id('TST204H5'), rows)
+    expect(result.restrictions).toEqual({ kind: 'true', status: 'met', text: 'Priority is given to students enrolled in the Synthetic Major.' })
+    expect(result.overall).toBe('met')
+    expect(engine.eligibility(rows).get(id('TST204H5'))).toBe('met')
+    expect(engine.evaluateCourse(id('TST204H5'), record()).overall).toBe('unmet')
+  })
+
+  it('only "may exclude" when the match is in unparsed text', () => {
+    const rows = record(['TST101H5', 'completed'])
+    expect(engine.evaluateCourse(id('TST300H5'), rows).exclusions).toEqual({ status: 'unknown', blockedBy: ids('TST101H5') })
+    expect(engine.evaluateCourse(id('TST300H5'), rows).overall).toBe('unknown')
+    expect(engine.evaluateCourse(id('TST300H5'), record(['TST101H5', 'completed', 30])).exclusions).toEqual({ status: 'unknown', blockedBy: [] })
+    // A parsed leaf still blocks; the text-only match is listed with it.
+    expect(engine.evaluateCourse(id('TST301H5'), record(['TST100H5', 'inProgress'], ['TST102H5', 'completed'])).exclusions)
+      .toEqual({ status: 'blocked', blockedBy: ids('TST100H5', 'TST102H5') })
+    expect(engine.evaluateCourse(id('TST301H5'), record(['TST102H5', 'completed'])).exclusions).toEqual({ status: 'unknown', blockedBy: ids('TST102H5') })
+  })
+
+  it('only "may exclude" when the match is a code absent from this calendar (older records)', () => {
+    const rows = record(['TST190Y5', 'completed'])
+    expect(engine.evaluateCourse(id('TST302H5'), rows).exclusions).toEqual({ status: 'unknown', blockedBy: ids('TST190Y5') })
+    expect(engine.evaluateCourse(id('TST302H5'), record()).exclusions).toEqual({ status: 'clear', blockedBy: [] })
+    expect(engine.evaluateCourse(id('TST302H5'), record(['TST100H5', 'completed'])).exclusions?.status).toBe('blocked')
+    expect(engine.evaluateCourse(id('TST303H5'), rows).exclusions).toEqual({ status: 'unknown', blockedBy: ids('TST190Y5') })
+    expect(engine.evaluateCourse(id('TST303H5'), record(['TST100H5', 'completed'])).exclusions).toEqual({ status: 'clear', blockedBy: [] })
+  })
+
+  it('blocks on a parsed AND only when every member is on the record', () => {
+    expect(engine.evaluateCourse(id('TST304H5'), record(['TST100H5', 'completed'])).exclusions).toEqual({ status: 'clear', blockedBy: [] })
+    expect(engine.evaluateCourse(id('TST304H5'), record(['TST100H5', 'completed'], ['TST101H5', 'completed'])).exclusions)
+      .toEqual({ status: 'blocked', blockedBy: ids('TST100H5', 'TST101H5') })
+  })
+
+  it('turns an unmet requirement unknown when the record holds one of its codes absent from this calendar', () => {
+    const result = engine.evaluateCourse(id('TST305H5'), record(['TST190Y5', 'completed'], ['TST191H5', 'planned']))
+    expect(result.prerequisites).toMatchObject({ kind: 'course', status: 'unknown', courseId: id('TST101H5') })
+    expect(result.corequisites).toMatchObject({ kind: 'course', status: 'unknown', courseId: id('TST102H5') })
+    expect(result.overall).toBe('unknown')
+    // Same semantics as any other course: a planned code is no prerequisite, a failed one never counts.
+    expect(engine.evaluateCourse(id('TST305H5'), record(['TST190Y5', 'planned'])).prerequisites?.status).toBe('unmet')
+    expect(engine.evaluateCourse(id('TST305H5'), record(['TST190Y5', 'completed', 20])).prerequisites?.status).toBe('unmet')
+    expect(engine.evaluateCourse(id('TST305H5'), record(['TST101H5', 'completed'], ['TST190Y5', 'completed'])).prerequisites?.status).toBe('met')
   })
 
   it('evaluates an already-passed course without hiding it from details', () => {
@@ -203,6 +280,21 @@ describe('programProgress', () => {
     expect(progress.groups.every(group => group.status === 'met')).toBe(true)
     expect(progress.completion).toBe('unknown')
   })
+
+  it('is met when a credit pool can use a course no other group needs', () => {
+    const credits: Rule = { kind: 'credits', minimum: 0.5, courseIds: ids('TST100H5', 'TST101H5') }
+    for (const second of ['TST100H5', 'TST101H5']) {
+      const progress = engine.programProgress(program([{ rule: credits }, { rule: course(second) }]), record(['TST100H5', 'completed'], ['TST101H5', 'completed']))
+      expect(progress.completion, second).toBe('met')
+    }
+  })
+
+  it('turns an unmet group unknown when the record holds one of its codes absent from this calendar', () => {
+    const target = program([{ rule: course('TST100H5'), unresolved: ['TST190Y5'] }])
+    expect(engine.programProgress(target, record(['TST190Y5', 'completed'])).groups[0].status).toBe('unknown')
+    expect(engine.programProgress(target, record(['TST190Y5', 'inProgress'])).groups[0].status).toBe('unmet')
+    expect(engine.programProgress(target, record()).groups[0].status).toBe('unmet')
+  })
 })
 
 describe('nextCourses', () => {
@@ -247,13 +339,18 @@ describe('nextCourses', () => {
     expect(next.every(entry => entry.reason === 'needs-prerequisites')).toBe(true)
   })
 
-  it('drops courses blocked by an exclusion', () => {
-    const data = dataset([{ code: 'TST100H5' }, { code: 'TST101H5', exclusion: course('TST100H5') }, { code: 'TST102H5' }])
-    const target = program([{ rule: all(course('TST101H5'), course('TST102H5')) }])
-    expect(nextIds(createEngine(data), target, [['TST100H5', 'completed']])).toEqual(ids('TST102H5'))
+  it('drops courses blocked by an exclusion, but keeps one that only may be excluded', () => {
+    const data = dataset([
+      { code: 'TST100H5' }, { code: 'TST101H5', exclusion: course('TST100H5') }, { code: 'TST102H5' },
+      { code: 'TST103H5', exclusion: { rule: unknown('TST100H5 (Winter 2025)'), extra: ['TST100H5'] } },
+      { code: 'TST104H5', exclusion: { rule: { kind: 'true' }, unresolved: ['TST190Y5'] } },
+    ])
+    const target = program([{ rule: all(course('TST101H5'), course('TST102H5'), course('TST103H5'), course('TST104H5')) }])
+    const next = createEngine(data).nextCourses(target, record(['TST100H5', 'completed'], ['TST190Y5', 'completed']))
+    expect(next.map(entry => [entry.courseId, entry.eligibility])).toEqual([[id('TST102H5'), 'met'], [id('TST103H5'), 'unknown'], [id('TST104H5'), 'unknown']])
   })
 
-  it('ranks ready courses first, then by program courses unlocked, then by group order', () => {
+  it('ranks ready courses first, then by program courses unlocked, then by group order (one per tier)', () => {
     const data = dataset([
       { code: 'TST100H5' }, { code: 'TST101H5' },
       { code: 'TST200H5', prereq: unknown('Grade 12 Calculus') },
@@ -270,6 +367,93 @@ describe('nextCourses', () => {
       { courseId: id('TST200H5'), eligibility: 'unknown', groups: ['g2'], unlocks: 0, reason: 'check-requirements' },
       { courseId: id('TST300H5'), eligibility: 'unmet', groups: ['g3'], unlocks: 0, reason: 'needs-prerequisites' },
     ])
+  })
+
+  it('ranks unknown before unmet, and unknown with a cited prerequisite taken before unknown with none taken', () => {
+    const data = dataset([
+      { code: 'TST100H5' }, { code: 'TST101H5' },
+      // Unknown, cites TST100H5, which is taken.
+      { code: 'TST200H5', prereq: any(course('TST100H5'), unknown('Grade 12 Calculus')), restriction: 'Not open to students in program X.' },
+      // Unknown, cites nothing (high-school wording only).
+      { code: 'TST201H5', prereq: unknown('Grade 12 Advanced Functions') },
+      // Unknown, cites TST101H5, which is not taken.
+      { code: 'TST202H5', prereq: any(course('TST101H5'), unknown('or equivalent')) },
+      // Unknown only because of a restriction; nothing cited.
+      { code: 'TST203H5', restriction: 'Not open to students in program X.' },
+      // Unmet, the best unlocker of all.
+      { code: 'TST300H5', prereq: course('TST101H5') },
+      { code: 'TST400H5', prereq: all(course('TST300H5'), course('TST202H5'), course('TST201H5')) },
+      { code: 'TST401H5', prereq: course('TST300H5') },
+    ])
+    const target = program([
+      { rule: any(course('TST300H5'), course('TST202H5'), course('TST201H5'), course('TST200H5'), course('TST203H5')) },
+      { rule: any(course('TST400H5'), course('TST401H5')) },
+    ])
+    const next = createEngine(data).nextCourses(target, record(['TST100H5', 'completed']), 4)
+    expect(next.map(entry => [entry.courseId, entry.eligibility, entry.unlocks])).toEqual([
+      [id('TST201H5'), 'unknown', 1],
+      [id('TST200H5'), 'unknown', 0],
+      [id('TST203H5'), 'unknown', 0],
+      [id('TST202H5'), 'unknown', 1],
+    ])
+    // The unmet course comes last although it unlocks the most.
+    expect(createEngine(data).nextCourses(target, record(['TST100H5', 'completed'])).slice(4).map(entry => entry.courseId)).toEqual(ids('TST300H5', 'TST400H5', 'TST401H5'))
+  })
+
+  it('never lists a course before a listed prerequisite it still needs, directly or through another course', () => {
+    const data = dataset([
+      // TST300H5 is one option of TST400H5's prerequisite; TST300H5 itself needs an absent course.
+      { code: 'TST300H5', prereq: course('TST290H5') },
+      { code: 'TST400H5', prereq: any(course('TST300H5'), unknown('or equivalent')) },
+      { code: 'TST410H5', prereq: course('TST400H5') },
+      { code: 'TST411H5', prereq: course('TST400H5') },
+      // TST200H5 needs TST150H5 (not offered), which needs TST100H5.
+      { code: 'TST100H5', prereq: course('TST050H5') },
+      { code: 'TST150H5', prereq: course('TST100H5') },
+      { code: 'TST200H5', prereq: course('TST150H5') },
+      { code: 'TST250H5', prereq: course('TST200H5') },
+    ])
+    // Unparsed groups: their courses are offered without expanding prerequisites.
+    const opaque = (code: string) => ({ rule: all(unknown(), course(code)) })
+    const target = program([opaque('TST400H5'), opaque('TST410H5'), opaque('TST411H5'), opaque('TST300H5'), opaque('TST200H5'), opaque('TST250H5'), opaque('TST100H5')])
+    const next = createEngine(data).nextCourses(target, record())
+    const order = next.map(entry => entry.courseId)
+    // By tier and unlocks alone, TST400H5 (unknown, unlocks 2) would lead and TST200H5 (unlocks 1) would beat TST100H5 (unlocks 0).
+    expect(next.find(entry => entry.courseId === id('TST400H5'))).toMatchObject({ eligibility: 'unknown', unlocks: 2 })
+    expect(order.indexOf(id('TST300H5'))).toBeLessThan(order.indexOf(id('TST400H5')))
+    expect(order.indexOf(id('TST100H5'))).toBeLessThan(order.indexOf(id('TST200H5')))
+    expect(order.indexOf(id('TST200H5'))).toBeLessThan(order.indexOf(id('TST250H5')))
+    // A truncated list keeps the prerequisite with its dependent.
+    const top = nextIds(createEngine(data), target, [], 2)
+    expect(top).toEqual(ids('TST300H5', 'TST400H5'))
+  })
+
+  it('imposes no order through a prerequisite option that is already satisfied', () => {
+    const data = dataset([
+      { code: 'TST100H5' }, { code: 'TST101H5', prereq: course('TST050H5') },
+      { code: 'TST200H5', prereq: any(course('TST100H5'), course('TST101H5')) },
+      // Unknown overall, but its OR is met by TST100H5: TST101H5 is not needed.
+      { code: 'TST201H5', prereq: all(any(course('TST100H5'), course('TST101H5')), unknown('Grade 12 Calculus')) },
+    ])
+    const target = program([{ rule: course('TST200H5') }, { rule: course('TST201H5') }, { rule: all(unknown(), course('TST101H5')) }])
+    expect(createEngine(data).nextCourses(target, record(['TST100H5', 'completed'])).map(entry => [entry.courseId, entry.eligibility]))
+      .toEqual([[id('TST200H5'), 'met'], [id('TST201H5'), 'unknown'], [id('TST101H5'), 'unmet']])
+  })
+
+  it('explains what is missing: prerequisites, or only corequisites', () => {
+    const data = dataset([
+      { code: 'TST100H5' }, { code: 'TST101H5' },
+      { code: 'TST200H5', prereq: course('TST100H5'), coreq: course('TST101H5') },
+      { code: 'TST201H5', coreq: course('TST101H5') },
+      { code: 'TST202H5', prereq: unknown(), coreq: course('TST101H5') },
+    ])
+    const target = program([{ rule: all(unknown(), course('TST200H5'), course('TST201H5'), course('TST202H5')) }])
+    const reasons = (rows: Row[]) => Object.fromEntries(createEngine(data).nextCourses(target, record(...rows)).map(entry => [entry.courseId, entry.reason]))
+    expect(reasons([])).toEqual({ [id('TST200H5')]: 'needs-prerequisites', [id('TST201H5')]: 'needs-corequisites', [id('TST202H5')]: 'needs-corequisites' })
+    expect(reasons([['TST100H5', 'completed']])[id('TST200H5')]).toBe('needs-corequisites')
+    expect(reasons([['TST100H5', 'completed'], ['TST101H5', 'planned']])).toEqual({
+      [id('TST200H5')]: 'ready', [id('TST201H5')]: 'ready', [id('TST202H5')]: 'check-requirements',
+    })
   })
 
   it('returns at most 12 by default and honours an explicit limit', () => {

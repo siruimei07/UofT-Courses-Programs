@@ -1,26 +1,28 @@
 // Rule engine over the frontend GraphDataset (contract: engine-types.ts). Indexes are built once
 // per dataset; every call evaluates one student record and returns structured results only, which
 // the UI words in the active language.
-import type { GraphCourse, GraphDataset, ProgramLite } from '../data/schema'
+import type { GraphCourse, GraphDataset, ProgramLite, RequirementLite } from '../data/schema'
 import type { Eligibility } from '../graph/types'
 import type {
   CourseEngine, CourseEvaluation, CreateEngine, EvalNode, ExclusionCheck, NextCourse, ProgramGroupProgress,
-  ProgramProgress, StudentRecord,
+  ProgramProgress,
 } from './engine-types'
 import {
-  combine, counts, createEvalContext, evaluateRule, isFailed, isPassed, usedCourses,
-  type CourseFacts, type EvalContext, type RuleIndex,
+  claimDisjoint, combine, counts, createEvalContext, evaluateRule, isFailed, isPassed,
+  type CourseFacts, type Counting, type EvalContext, type RuleIndex,
 } from './evaluate'
+import { isPriorityOnly } from './restrictions'
 import { containsOpaque, ruleCourseIds } from './rules'
 import type { Rule } from './types'
 
 export const NEXT_COURSES_LIMIT = 12
 
 interface ExclusionIndex {
-  /** Excluded course ids (the course itself removed). */
+  rule: Rule
+  /** Every excluded id in field order: parsed leaves, ids cited only by the text, codes absent from this calendar. */
   ids: string[]
-  /** Part of the official wording is not parsed, so a clear record cannot be confirmed. */
-  opaque: boolean
+  /** Ids that are parsed leaves of the rule; only these can block for certain. */
+  parsed: ReadonlySet<string>
 }
 
 interface ProgramIndex {
@@ -46,8 +48,13 @@ interface Candidate {
   via: string[]
 }
 
+interface Ranked extends NextCourse {
+  tier: number
+  rank: number
+  seq: number
+}
+
 const EXCLUSION_ELIGIBILITY: Record<ExclusionCheck['status'], Eligibility> = { clear: 'met', blocked: 'unmet', unknown: 'unknown' }
-const REASON: Record<Eligibility, NextCourse['reason']> = { met: 'ready', unmet: 'needs-prerequisites', unknown: 'check-requirements' }
 
 const unique = (ids: Iterable<string>) => [...new Set(ids)]
 
@@ -55,6 +62,30 @@ function addTo(map: Map<string, Set<string>>, key: string, value: string): void 
   let set = map.get(key)
   if (!set) map.set(key, (set = new Set()))
   set.add(value)
+}
+
+/**
+ * Whether the parsed part of an exclusion is triggered by the record. Codes dropped by the parser
+ * leave `true` behind, which never triggers; a cohort clause can only make a match uncertain.
+ */
+function exclusionTrigger(rule: Rule, ctx: EvalContext): Eligibility {
+  switch (rule.kind) {
+    case 'true': return 'unmet'
+    case 'course': case 'minGrade': return counts(ctx.record.get(rule.courseId), 'current') ? 'met' : 'unmet'
+    case 'credits': return evaluateRule(rule, ctx, 'current').status
+    case 'all': case 'any': return combine(rule.kind, rule.items.map(item => exclusionTrigger(item, ctx)))
+    case 'applicability': return exclusionTrigger(rule.rule, ctx) === 'unmet' ? 'unmet' : 'unknown'
+    case 'permission': case 'program': case 'unknown': return 'unknown'
+  }
+}
+
+/**
+ * A requirement the record fails may still be met by a code absent from this calendar (a retired
+ * course on an older record): the requirement then becomes unknown instead of unmet.
+ */
+function withRetired(node: EvalNode, requirement: Pick<RequirementLite, 'unresolved'>, ctx: EvalContext, counting: Counting): EvalNode {
+  if (node.status !== 'unmet' || !requirement.unresolved?.some(id => counts(ctx.record.get(id), counting))) return node
+  return { ...node, status: 'unknown' }
 }
 
 export const createEngine: CreateEngine = (dataset: GraphDataset): CourseEngine => {
@@ -71,40 +102,54 @@ export const createEngine: CreateEngine = (dataset: GraphDataset): CourseEngine 
   const exclusionPeers = new Map<string, Set<string>>()
   /** Prerequisite id → courses whose prerequisites list it. */
   const dependents = new Map<string, Set<string>>()
+  /** Course id → every course its prerequisite field cites (parsed, text-only and absent codes). */
+  const prerequisiteRefs = new Map<string, string[]>()
+  /** Courses whose restriction is only an enrolment-priority note (spec 19.9). */
+  const priorityOnly = new Set<string>()
   for (const course of dataset.courses) {
     if (course.exclusion) {
-      const ids = unique([...course.exclusion.ids, ...ruleCourseIds(course.exclusion.rule)]).filter(id => id !== course.id)
-      exclusions.set(course.id, { ids, opaque: containsOpaque(course.exclusion.rule) })
+      const parsed = ruleCourseIds(course.exclusion.rule)
+      const ids = unique([...parsed, ...course.exclusion.ids, ...(course.exclusion.unresolved ?? [])]).filter(id => id !== course.id)
+      exclusions.set(course.id, { rule: course.exclusion.rule, ids, parsed: new Set(parsed) })
       for (const id of ids) {
         addTo(exclusionPeers, course.id, id)
         addTo(exclusionPeers, id, course.id)
       }
     }
     if (course.prereq) {
-      for (const id of [...course.prereq.ids, ...ruleCourseIds(course.prereq.rule)]) {
-        if (id !== course.id) addTo(dependents, id, course.id)
-      }
+      const ids = unique([...course.prereq.ids, ...ruleCourseIds(course.prereq.rule)]).filter(id => id !== course.id)
+      for (const id of ids) addTo(dependents, id, course.id)
+      prerequisiteRefs.set(course.id, unique([...ids, ...(course.prereq.unresolved ?? [])]))
     }
+    if (course.restriction && isPriorityOnly(course.restriction.text)) priorityOnly.add(course.id)
   }
   const index: RuleIndex = { courses: facts, exclusionPeers }
   const byPosition = (a: string, b: string) => (position.get(a) ?? 0) - (position.get(b) ?? 0)
 
-  function exclusionCheck(courseId: string, record: StudentRecord): ExclusionCheck | null {
+  // 'blocked' needs a parsed leaf that triggers the rule. A match among ids cited only by unparsed
+  // text, or among codes absent from this calendar, "may exclude" ('unknown'), as does an
+  // unparsed rule with no match at all.
+  function exclusionCheck(courseId: string, ctx: EvalContext): ExclusionCheck | null {
     const exclusion = exclusions.get(courseId)
     if (!exclusion) return null
-    // Passed or in-progress courses block; a failed attempt earns no credit and does not.
-    const blockedBy = exclusion.ids.filter(id => counts(record.get(id), 'current'))
-    return { status: blockedBy.length ? 'blocked' : exclusion.opaque ? 'unknown' : 'clear', blockedBy }
+    const trigger = exclusionTrigger(exclusion.rule, ctx)
+    // Passed or in-progress courses count; a failed attempt earns no credit and does not.
+    const matches = exclusion.ids.filter(id => counts(ctx.record.get(id), 'current'))
+    if (trigger === 'met') return { status: 'blocked', blockedBy: matches }
+    const possible = trigger === 'unknown' ? matches : matches.filter(id => !exclusion.parsed.has(id))
+    return possible.length || trigger === 'unknown' ? { status: 'unknown', blockedBy: possible } : { status: 'clear', blockedBy: [] }
   }
 
   function evaluateCourseIn(course: GraphCourse, ctx: EvalContext): CourseEvaluation {
-    const prerequisites = course.prereq ? evaluateRule(course.prereq.rule, ctx, 'current') : null
-    const corequisites = course.coreq ? evaluateRule(course.coreq.rule, ctx, 'planned') : null
-    const exclusionResult = exclusionCheck(course.id, ctx.record)
-    // Restrictions are opaque official text (often negative: "not open to …"), never requirements.
-    const restrictions: EvalNode | null = course.restriction
-      ? { kind: 'unknown', status: 'unknown', text: course.restriction.text }
-      : null
+    const prerequisites = course.prereq ? withRetired(evaluateRule(course.prereq.rule, ctx, 'current'), course.prereq, ctx, 'current') : null
+    const corequisites = course.coreq ? withRetired(evaluateRule(course.coreq.rule, ctx, 'planned'), course.coreq, ctx, 'planned') : null
+    const exclusionResult = exclusionCheck(course.id, ctx)
+    // Restrictions are official text, often negative ("not open to …"), never evaluated as
+    // requirements: unknown, except an enrolment-priority note, which never decides eligibility
+    // and is reported as a met node that carries the text.
+    const restrictions: EvalNode | null = !course.restriction ? null
+      : priorityOnly.has(course.id) ? { kind: 'true', status: 'met', text: course.restriction.text }
+      : { kind: 'unknown', status: 'unknown', text: course.restriction.text }
     const parts: Eligibility[] = []
     if (prerequisites) parts.push(prerequisites.status)
     if (corequisites) parts.push(corequisites.status)
@@ -149,15 +194,8 @@ export const createEngine: CreateEngine = (dataset: GraphDataset): CourseEngine 
     if (!completion.length) return 'unknown'
     const status = combine('all', completion.map(node => node.status))
     if (status !== 'met') return status
-    // Each group may be met by the same course; sharing rules between groups are not parsed.
-    const used = new Set<string>()
-    for (const node of completion) {
-      for (const id of new Set(usedCourses(node, ctx))) {
-        if (used.has(id)) return 'unknown'
-        used.add(id)
-      }
-    }
-    return 'met'
+    // Sharing rules between groups are not parsed: met only when no course serves two groups.
+    return claimDisjoint(completion, ctx) ? 'met' : 'unknown'
   }
 
   return {
@@ -165,8 +203,9 @@ export const createEngine: CreateEngine = (dataset: GraphDataset): CourseEngine 
       const ctx = createEvalContext(index, record)
       const result = new Map<string, Eligibility>()
       for (const course of dataset.courses) {
-        const status = record.get(course.id)?.status
-        if (status === 'completed' || status === 'inProgress') continue
+        // A failed course is not passed: it may be retaken, so it stays in the map.
+        const entry = record.get(course.id)
+        if (isPassed(entry) || entry?.status === 'inProgress') continue
         result.set(course.id, evaluateCourseIn(course, ctx).overall)
       }
       return result
@@ -181,7 +220,7 @@ export const createEngine: CreateEngine = (dataset: GraphDataset): CourseEngine 
     programProgress(program, record): ProgramProgress {
       const info = programIndex(program)
       const ctx = createEvalContext(index, record)
-      const nodes = program.groups.map(group => evaluateRule(group.rule, ctx, 'completed'))
+      const nodes = program.groups.map(group => withRetired(evaluateRule(group.rule, ctx, 'completed'), group, ctx, 'completed'))
       const groups = program.groups.map((group, i): ProgramGroupProgress => {
         const ids = info.groupCourseIds[i]
         return {
@@ -243,7 +282,7 @@ export const createEngine: CreateEngine = (dataset: GraphDataset): CourseEngine 
 
       program.groups.forEach((group, rank) => {
         // Planned and in-progress courses already fill a requirement for planning purposes.
-        const node = evaluateRule(group.rule, ctx, 'planned')
+        const node = withRetired(evaluateRule(group.rule, ctx, 'planned'), group, ctx, 'planned')
         if (node.status === 'met') return
         follow(group.rule, node, rank, group.id, !info.opaque[rank])
         for (const id of info.textOnlyIds[rank]) offer(id, rank, group.id, false)
@@ -254,7 +293,23 @@ export const createEngine: CreateEngine = (dataset: GraphDataset): CourseEngine 
         for (const dependent of dependents.get(id) ?? []) if (info.courseSet.has(dependent)) count++
         return count
       }
-      const ranked: (NextCourse & { rank: number; seq: number })[] = []
+      // Tiers: ready; unknown with a cited prerequisite taken (or none cited); unknown with none
+      // of them taken; unmet.
+      const tierOf = (course: GraphCourse, evaluation: CourseEvaluation): number => {
+        if (evaluation.overall === 'met') return 0
+        if (evaluation.overall === 'unmet') return 3
+        if (!evaluation.prerequisites || evaluation.prerequisites.status === 'met') return 1
+        const cited = prerequisiteRefs.get(course.id) ?? []
+        return !cited.length || cited.some(id => counts(record.get(id), 'current')) ? 1 : 2
+      }
+      const reasonOf = (evaluation: CourseEvaluation): NextCourse['reason'] => {
+        if (evaluation.overall === 'met') return 'ready'
+        if (evaluation.overall === 'unknown') return 'check-requirements'
+        return evaluation.prerequisites?.status !== 'unmet' && evaluation.corequisites?.status === 'unmet'
+          ? 'needs-corequisites' : 'needs-prerequisites'
+      }
+
+      const ranked: Ranked[] = []
       for (const candidate of candidates.values()) {
         const course = byId.get(candidate.id)
         if (!course) continue
@@ -265,14 +320,58 @@ export const createEngine: CreateEngine = (dataset: GraphDataset): CourseEngine 
           eligibility: evaluation.overall,
           groups: info.groupsOf.get(candidate.id) ?? candidate.via,
           unlocks: unlocksOf(candidate.id),
-          reason: REASON[evaluation.overall],
+          reason: reasonOf(evaluation),
+          tier: tierOf(course, evaluation),
           rank: candidate.rank,
           seq: candidate.seq,
         })
       }
-      ranked.sort((a, b) =>
-        Number(b.eligibility === 'met') - Number(a.eligibility === 'met') || b.unlocks - a.unlocks || a.rank - b.rank || a.seq - b.seq)
-      return ranked.slice(0, limit).map(({ courseId, eligibility, groups, unlocks, reason }) => ({ courseId, eligibility, groups, unlocks, reason }))
+      ranked.sort((a, b) => a.tier - b.tier || b.unlocks - a.unlocks || a.rank - b.rank || a.seq - b.seq)
+
+      // Prerequisites the course still needs: courses in the parts of its prerequisite tree that
+      // are not met, and transitively theirs. Met parts (an OR already satisfied) impose nothing.
+      const needs = new Map<string, ReadonlySet<string>>()
+      const needsOf = (id: string): ReadonlySet<string> => {
+        const known = needs.get(id)
+        if (known) return known
+        const found = new Set<string>()
+        needs.set(id, found) // A prerequisite cycle stops here instead of recursing forever.
+        const course = byId.get(id)
+        const node = course?.prereq ? evaluationOf(course).prerequisites : null
+        if (!course?.prereq || !node || node.status === 'met') return found
+        const direct = new Set<string>()
+        const collect = (rule: Rule, evaluated: EvalNode | undefined): void => {
+          if (!evaluated || evaluated.status === 'met') return
+          switch (rule.kind) {
+            case 'all': case 'any': rule.items.forEach((item, i) => collect(item, evaluated.children?.[i])); break
+            case 'applicability': collect(rule.rule, evaluated.children?.[0]); break
+            case 'course': case 'minGrade': direct.add(rule.courseId); break
+            case 'credits': rule.courseIds?.forEach(courseId => direct.add(courseId)); break
+            default: break
+          }
+        }
+        collect(course.prereq.rule, node)
+        for (const prerequisite of direct) {
+          if (prerequisite === id) continue
+          found.add(prerequisite)
+          if (!isPassed(record.get(prerequisite))) needsOf(prerequisite).forEach(more => found.add(more))
+        }
+        return found
+      }
+
+      // Best first, except that a course never precedes a listed prerequisite it still needs. On a
+      // prerequisite cycle the best remaining course goes next.
+      const listed = new Set(ranked.map(entry => entry.courseId))
+      const pending = ranked.map(entry => ({ entry, before: [...needsOf(entry.courseId)].filter(id => id !== entry.courseId && listed.has(id)) }))
+      const placed = new Set<string>()
+      const ordered: NextCourse[] = []
+      while (pending.length && ordered.length < limit) {
+        const next = Math.max(0, pending.findIndex(item => item.before.every(id => placed.has(id))))
+        const [{ entry }] = pending.splice(next, 1)
+        placed.add(entry.courseId)
+        ordered.push({ courseId: entry.courseId, eligibility: entry.eligibility, groups: entry.groups, unlocks: entry.unlocks, reason: entry.reason })
+      }
+      return ordered
     },
   }
 }
