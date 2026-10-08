@@ -1,0 +1,36 @@
+{
+  "measuredAt": "2026-10-08T04:48:35.406Z",
+  "environment": {
+    "platform": "win32",
+    "release": "10.0.26200",
+    "cpu": "Intel(R) Core(TM) Ultra 7 270K Plus",
+    "node": "v24.19.0"
+  },
+  "catalog": {
+    "academicYear": "2026-2027",
+    "courses": 2491,
+    "programs": 168
+  },
+  "allEligibilityMs": 254.45,
+  "fullGraph": {
+    "courseNodes": 2491,
+    "totalNodes": 2565,
+    "edges": 6218,
+    "projectionMs": 14.57
+  },
+  "densestSubject": {
+    "subject": "HIS",
+    "courseNodes": 115,
+    "edges": 727,
+    "projectionMs": 0.67,
+    "elkMs": 554.83,
+    "elkNodes": 115
+  },
+  "recommendation": {
+    "program": "ERMAJ1688",
+    "candidates": 58,
+    "ms": 21.93
+  },
+  "strategy": "Fixed course-level columns and subject lanes for default projection; optional lazy ELK only orders rows within those columns. All-catalog access uses search/list and bounded progressive graph rendering.",
+  "caveat": "Local single-run timings are observations, not a hardware-independent guarantee. Browser rendering is verified separately."
+}

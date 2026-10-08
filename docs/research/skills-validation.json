@@ -1,0 +1,40 @@
+{
+  "status": "passed",
+  "codexVersion": "codex-cli 0.162.0-alpha.2",
+  "method": "app-server skills/list forceReload",
+  "fileIntegrity": "passed",
+  "outsideProjectIsolation": "passed",
+  "skills": [
+    {
+      "name": "github-pages-release",
+      "path": ".agents/skills/github-pages-release/SKILL.md",
+      "scope": "repo",
+      "enabled": true
+    },
+    {
+      "name": "uoft-calendar-data",
+      "path": ".agents/skills/uoft-calendar-data/SKILL.md",
+      "scope": "repo",
+      "enabled": true
+    },
+    {
+      "name": "uoft-course-planner",
+      "path": ".agents/skills/uoft-course-planner/SKILL.md",
+      "scope": "repo",
+      "enabled": true
+    },
+    {
+      "name": "uoft-graph-ui",
+      "path": ".agents/skills/uoft-graph-ui/SKILL.md",
+      "scope": "repo",
+      "enabled": true
+    },
+    {
+      "name": "vercel-react-best-practices",
+      "path": ".agents/skills/vercel-react-best-practices/SKILL.md",
+      "scope": "repo",
+      "enabled": true
+    }
+  ],
+  "scope": "Skill preparation only; no application, full catalog, or deployment tested."
+}
