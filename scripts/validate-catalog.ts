@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs'
 import type { Catalog, Requirement, Rule } from '../src/domain/types'
 import { ruleCourseIds } from '../src/domain/planner'
 
-const catalog = JSON.parse(readFileSync('public/data/catalog.json', 'utf8')) as Catalog
+const catalog = JSON.parse(readFileSync('data/utm/catalog.json', 'utf8')) as Catalog
 const validId = /^(UTM|UTSG|UTSC|external):[A-Z0-9]+$/
 const counters: Record<string, number> = {}
 function ruleCheck(rule: Rule): void {
@@ -76,14 +76,14 @@ for (const program of catalog.programs) {
     requirementCheck(group)
   }
 }
-const quality = JSON.parse(readFileSync('public/data/quality-report.json', 'utf8')) as {
+const quality = JSON.parse(readFileSync('data/utm/quality-report.json', 'utf8')) as {
   academicYear: string
   parserVersion: string
   complete: boolean
   failures: unknown[]
   coverage: Record<'courses' | 'programs', { discovered: number; collected: number; pages: number; pageNumbers: number[]; duplicates: unknown[] }>
 }
-const manifest = JSON.parse(readFileSync('public/data/manifest.json', 'utf8')) as {
+const manifest = JSON.parse(readFileSync('data/utm/manifest.json', 'utf8')) as {
   academicYear: string
   complete: boolean
   directories: Record<'course' | 'program', { pages: { page: number; count: number; codes: string[] }[]; entities: { code: string }[] }>

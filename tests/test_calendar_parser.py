@@ -6,7 +6,7 @@ import sys
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / 'scripts'))
+sys.path.insert(0, str(ROOT / 'pipeline'))
 from calendar_parser import course_id, cycles, exclusion_rule, parse_rule, program_groups, refs, walk  # noqa: E402
 from bs4 import BeautifulSoup  # noqa: E402
 
@@ -126,13 +126,13 @@ class RequirementSemantics(unittest.TestCase):
 class PublishedSnapshot(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        path = ROOT / 'public' / 'data' / 'catalog.json'
+        path = ROOT / 'data' / 'utm' / 'catalog.json'
         if not path.exists():
             raise unittest.SkipTest('Run manual collection before snapshot validation')
         cls.catalog = json.loads(path.read_text(encoding='utf-8'))
         cls.courses = {c['code']: c for c in cls.catalog['courses']}
-        cls.report = json.loads((ROOT / 'public' / 'data' / 'quality-report.json').read_text(encoding='utf-8'))
-        cls.manifest = json.loads((ROOT / 'public' / 'data' / 'manifest.json').read_text(encoding='utf-8'))
+        cls.report = json.loads((ROOT / 'data' / 'utm' / 'quality-report.json').read_text(encoding='utf-8'))
+        cls.manifest = json.loads((ROOT / 'data' / 'utm' / 'manifest.json').read_text(encoding='utf-8'))
 
     def test_every_discovered_entity_has_one_verified_detail(self):
         self.assertTrue(self.catalog['metadata']['complete'])

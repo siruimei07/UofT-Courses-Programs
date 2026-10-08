@@ -13,8 +13,8 @@ import re
 from bs4 import BeautifulSoup, Tag
 
 ROOT = Path(__file__).resolve().parents[1]
-CACHE = ROOT / 'sources' / 'calendar'
-OUT = ROOT / 'public' / 'data'
+CACHE = ROOT / '.cache' / 'calendar'
+OUT = ROOT / 'data' / 'utm'
 PARSER_VERSION = '1.0.1'
 COURSE_PATTERN = r'[A-Z]{3}(?:\d{3}|[A-Z]\d{2})[HY][135]'
 COURSE_RE = re.compile(r'\b' + COURSE_PATTERN + r'\b')
@@ -471,7 +471,7 @@ def build_catalog(manifest, allow_decrease=False, accept=False):
     write_json(CACHE / 'catalog.candidate.json', catalog)
     write_json(CACHE / 'quality-report.candidate.json', report)
     if not catalog['metadata']['complete'] or report['failures']:
-        raise RuntimeError('Candidate incomplete or count guard failed; existing published snapshot preserved. See sources/calendar/quality-report.candidate.json')
+        raise RuntimeError('Candidate incomplete or count guard failed; existing published snapshot preserved. See .cache/calendar/quality-report.candidate.json')
     if accept:
         write_json(prior_path, catalog)
         write_json(OUT / 'quality-report.json', report)
@@ -505,14 +505,14 @@ def build_catalog(manifest, allow_decrease=False, accept=False):
 
 环路是包含 OR 备选与 unknown 引用的投影结果，不代表必然无法完成的学习路径。外部/目录外引用保留完整代码和来源，未扩张为其他校区目录，也未自动当作等价课程。
 
-详单：`public/data/manifest.json` 保留每页 URL、实际页码、课程/专业清单、哈希、抓取时间和每个详情状态；`public/data/quality-report.json` 保留每项未知规则、未解析原因、跨校区/目录外引用、引用它们的实体、全部环路与手动更新差异。原始 HTML 只在本机 `sources/calendar/`，不发布到浏览器。
+详单：`data/utm/manifest.json` 保留每页 URL、实际页码、课程/专业清单、哈希、抓取时间和每个详情状态；`data/utm/quality-report.json` 保留每项未知规则、未解析原因、跨校区/目录外引用、引用它们的实体、全部环路与手动更新差异。原始 HTML 只在本机 `.cache/calendar/`，不发布到浏览器。
 
 当前专业类型：{', '.join(f'{key} {value}' for key, value in sorted(report['programTypes'].items()))}。
 
 ## 环路详单
 
 ''' + '\n'.join('- ' + ', '.join(group) for group in report['cycles']) + '\n'
-        report_path = ROOT / 'reports' / 'data-quality.md'
+        report_path = ROOT / 'data' / 'utm' / 'data-quality.md'
         report_path.parent.mkdir(parents=True, exist_ok=True)
         report_path.write_text(markdown, encoding='utf-8')
     print(json.dumps({'accepted': accept, 'courses': len(catalog['courses']), 'programs': len(catalog['programs']),

@@ -19,8 +19,8 @@ import requests
 from bs4 import BeautifulSoup
 
 ROOT = Path(__file__).resolve().parents[1]
-CACHE = ROOT / 'sources' / 'calendar'
-OUT = ROOT / 'public' / 'data'
+CACHE = ROOT / '.cache' / 'calendar'
+OUT = ROOT / 'data' / 'utm'
 BASE = 'https://utm.calendar.utoronto.ca'
 LOCAL = threading.local()
 
@@ -330,7 +330,7 @@ def main():
         from calendar_parser import build_catalog
         build_catalog(manifest, args.allow_decrease, args.accept)
     if manifest.get('failures'):
-        raise SystemExit('Incomplete source collection; see sources/calendar/manifest.json')
+        raise SystemExit('Incomplete source collection; see .cache/calendar/manifest.json')
 
 
 if __name__ == '__main__':

@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest'
 import { createEmptyProfile, evaluateEligibility, evaluateRule, findDependencyCycles, getRelatedCourses, ruleCourseIds } from '../src/domain'
 import type { Catalog, StudentProfile } from '../src/domain/types'
 
-const catalog = JSON.parse(readFileSync('public/data/catalog.json', 'utf8')) as Catalog
+const catalog = JSON.parse(readFileSync('data/utm/catalog.json', 'utf8')) as Catalog
 function course(code: string) {
   const found = catalog.courses.find(item => item.code === code)
   if (!found) throw new Error(`Official regression sample missing from current snapshot: ${code}`)

@@ -1,1 +1,1 @@
--r scripts/requirements-calendar.txt
+-r pipeline/requirements.txt

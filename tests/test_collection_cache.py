@@ -9,7 +9,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / 'scripts'))
+sys.path.insert(0, str(ROOT / 'pipeline'))
 import collect_calendar as collector  # noqa: E402
 
 

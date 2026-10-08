@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest'
 import { createEmptyProfile, evaluateRule, recommendCourses } from '../src/domain'
 import type { Catalog, Rule, StudentProfile } from '../src/domain'
 
-const catalog = JSON.parse(readFileSync('public/data/catalog.json', 'utf8')) as Catalog
+const catalog = JSON.parse(readFileSync('data/utm/catalog.json', 'utf8')) as Catalog
 const completed = (codes: string[]): StudentProfile => ({
   ...createEmptyProfile(), recordComplete: true,
   courses: codes.map(code => ({ courseId: `UTM:${code}`, status: 'completed', grade: 80 })),
