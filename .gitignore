@@ -1,0 +1,26 @@
+# Dependencies & build output
+node_modules/
+dist/
+.vite/
+coverage/
+
+# Local caches (raw official HTML is never committed)
+.cache/
+sources/
+
+# Test artifacts
+test-results/
+playwright-report/
+blob-report/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Env & OS
+.env
+.env.*
+*.log
+.DS_Store
+Thumbs.db

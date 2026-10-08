@@ -1,0 +1,4 @@
+* text=auto eol=lf
+# Skills are revision- and byte-hash-locked; never normalize their contents.
+.agents/** -text
+*.png -text
