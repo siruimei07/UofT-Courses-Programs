@@ -358,6 +358,8 @@ function programIssues(program: Program, campus: CampusId, groupIds: Set<string>
   for (const key of ['description', 'notes'] as const) {
     if (typeof program[key] !== 'string') errors.push(`${where}: ${key} is not a string`)
   }
+  const codeSource: unknown = program.codeSource
+  if (codeSource !== undefined && codeSource !== 'url-slug') errors.push(`${where}: unsupported codeSource ${JSON.stringify(codeSource)}`)
   requirementIssues(program.admission, `${where}.admission`, errors, warnings)
   requirementIssues(program.completion, `${where}.completion`, errors, warnings)
   if (!Array.isArray(program.groups)) {
@@ -497,15 +499,19 @@ function toGraphCourse(course: Course, scope: IdScope): GraphCourse {
 }
 
 function toProgramGroupLite(group: ProgramGroup, scope: IdScope): ProgramGroupLite {
-  return {
+  const { ids, mentioned, unresolved } = requirementRefs(group, scope)
+  const lite: ProgramGroupLite = {
     id: group.id,
     label: normaliseText(group.label),
     category: group.category,
     text: normaliseText(group.rawText),
     rule: canonicalRule(group.rule),
-    // ProgramGroupLite has no mention/unresolved lists: only highlightable references are kept.
-    ids: requirementRefs(group, scope).ids,
+    // Only `ids` are highlighted; the other lists explain the official text.
+    ids,
   }
+  if (mentioned.length) lite.mentioned = mentioned
+  if (unresolved.length) lite.unresolved = unresolved
+  return lite
 }
 
 function toProgramLite(program: Program, scope: IdScope): ProgramLite {
@@ -515,6 +521,8 @@ function toProgramLite(program: Program, scope: IdScope): ProgramLite {
     code: normaliseText(program.code),
     title: normaliseText(program.title),
     type: normaliseText(program.type),
+    // A Focus program's code is its page slug: the panel must not present it as a POSt code.
+    ...(program.codeSource ? { codeSource: program.codeSource } : {}),
     sourceUrl: program.sourceUrl,
     description: normaliseText(program.description),
     ...(notes ? { notes } : {}),

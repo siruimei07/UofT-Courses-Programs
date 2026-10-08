@@ -6,7 +6,7 @@ import {
   type CampusSource, type SubjectsInput,
 } from '../scripts/build-frontend-data'
 import type { GraphCourse, RequirementLite } from '../src/data/schema'
-import type { Catalog, Course, Requirement, Rule } from '../src/domain/types'
+import type { Catalog, Course, Program, ProgramGroup, Requirement, Rule } from '../src/domain/types'
 
 const readJson = (path: string): unknown => JSON.parse(readFileSync(path, 'utf8'))
 const catalog = readJson('data/utm/catalog.json') as Catalog
@@ -239,6 +239,50 @@ describe('programs dataset', () => {
     expect(excepted?.ids).not.toContain('UTM:CSC392H5')
   })
 
+  it('carries the mentioned and retired codes of each group, sorted and never empty', () => {
+    const sources = new Map(catalog.programs.flatMap(program => program.groups).map(group => [group.id, group]))
+    let mentioned = 0
+    let unresolved = 0
+    for (const group of programs.programs.flatMap(program => program.groups)) {
+      const source = sources.get(group.id)!
+      expect(group.mentioned ?? [], group.id).toEqual(sorted(source.mentionedIds ?? []))
+      expect(group.unresolved ?? [], group.id).toEqual(sorted(source.unresolvedIds ?? []))
+      expect(group.mentioned).not.toEqual([])
+      expect(group.unresolved).not.toEqual([])
+      for (const id of group.unresolved ?? []) expect(catalogIds.has(id), `${group.id} unresolved ${id}`).toBe(false)
+      mentioned += group.mentioned?.length ?? 0
+      unresolved += group.unresolved?.length ?? 0
+    }
+    expect(mentioned).toBeGreaterThan(0)
+    expect(unresolved).toBeGreaterThan(0)
+    const excepted = programs.programs.find(program => program.code === 'ERMIN1688')?.groups
+      .find(group => group.text.includes('except for CSC392H5'))
+    expect(excepted?.mentioned).toContain('UTM:CSC392H5')
+  })
+
+  it('marks Focus programs whose code is the page slug', () => {
+    const focus = programs.programs.filter(program => program.type === 'Focus')
+    expect(focus.length).toBeGreaterThan(0)
+    for (const program of focus) {
+      expect(program.codeSource, program.id).toBe('url-slug')
+      expect(program.code).toBe(program.id.slice('UTM:'.length))
+    }
+    for (const program of programs.programs.filter(entry => entry.type !== 'Focus')) {
+      expect(program, program.id).not.toHaveProperty('codeSource')
+    }
+    expect(Object.keys(focus[0]).slice(0, 6)).toEqual(['id', 'code', 'title', 'type', 'codeSource', 'sourceUrl'])
+  })
+
+  it('never shows invented context as official group text', () => {
+    for (const group of programs.programs.flatMap(program => program.groups)) {
+      expect(group.text, group.id).not.toMatch(/Admission clauses depend/)
+    }
+    const major = programs.programs.find(program => program.code === 'ERMAJ1688')
+    const stream = major?.groups.filter(group => group.label.startsWith('UTMCIP stream')) ?? []
+    expect(stream.length).toBeGreaterThan(10)
+    for (const group of stream.slice(1)) expect(group.text, group.id).not.toMatch(/UTMCIP/)
+  })
+
   it('omits empty program notes', () => {
     for (const program of programs.programs) expect(program.notes).not.toBe('')
   })
@@ -312,6 +356,28 @@ describe('input validation', () => {
     expect(projected?.prereq).toMatchObject({ ids: ['UTM:TST100H5'], mentioned: ['UTM:TST150H5'] })
     const bad = course('TST300H5', { prerequisites: req(undefined, 'x', [], { mentionedIds: ['nope'] }) })
     expect(() => buildCampusDatasets(synthetic([bad]), null, utm)).toThrow(/malformed course id/)
+  })
+
+  it('projects program group roles and the code source of a synthetic program', () => {
+    const group: ProgramGroup = {
+      id: 'UTM:FOCUS-TEST:completion:1', label: 'Group A', category: 'completion', rawText: 'TST100H5 or OLD100H5 (except TST150H5)',
+      sourceUrl: 'https://utm.calendar.utoronto.ca/program/focus-test', rule: { kind: 'course', courseId: 'UTM:TST100H5' },
+      courseIds: ['UTM:TST100H5'], mentionedIds: ['UTM:TST150H5'], unresolvedIds: ['UTM:OLD100H5'],
+    }
+    const program: Program = {
+      id: 'UTM:FOCUS-TEST', campus: 'UTM', code: 'FOCUS-TEST', title: 'Focus in Testing', type: 'Focus', codeSource: 'url-slug',
+      description: '', sourceUrl: group.sourceUrl, contentHash: 'synthetic', fetchedAt: '2026-01-01T00:00:00+00:00',
+      admission: req(), completion: req(), groups: [group], notes: '',
+    }
+    const projected = buildCampusDatasets({ ...synthetic([course('TST100H5'), course('TST150H5')]), programs: [program] }, null, utm)
+      .programs.programs[0]
+    expect(projected.codeSource).toBe('url-slug')
+    expect(projected.groups[0]).toEqual({
+      id: group.id, label: 'Group A', category: 'completion', text: group.rawText, rule: group.rule,
+      ids: ['UTM:TST100H5'], mentioned: ['UTM:TST150H5'], unresolved: ['UTM:OLD100H5'],
+    })
+    const bad = { ...program, codeSource: 'guess' } as unknown as Program
+    expect(() => buildCampusDatasets({ ...synthetic([course('TST100H5')]), programs: [bad] }, null, utm)).toThrow(/unsupported codeSource/)
   })
 
   it('fails on unsupported rule kinds', () => {

@@ -80,8 +80,14 @@ and passes the count guard.
   threads (longer if `robots.txt` sets a crawl delay). `--workers` (1–6, default 2) only overlaps
   latency; it never raises the request rate. A full UTM collection is about 2,800 requests, so
   expect roughly 25–30 minutes.
-- HTTP 401/403/429 stops that request (no retry, no bypass). Other failures retry four times with
-  backoff and are recorded in the manifest; a manifest with failures is never parsed.
+- The first HTTP 401/403/429 stops the **whole** collection: no retry, no bypass, queued fetches
+  are cancelled and a request waiting for its throttle slot is never sent. The manifest is saved
+  incomplete (a `collection` failure with the refused URL and status, plus `stoppedAt`) and the
+  command exits non-zero; wait, then resume with a plain run (no `--refresh`). The supporting-source
+  collector does the same: it writes its manifest with a `stopped` record and exits with status 3.
+- A missing `robots.txt` (404/410) allows everything; any other `robots.txt` error stops the run.
+- Other failures retry four times with backoff and are recorded in the manifest; a manifest with
+  failures is never parsed.
 
 ### Generations and the cache
 
@@ -126,9 +132,13 @@ Open `.cache/calendar/quality-report.candidate.json` (and the catalog candidate)
   `existingWeightTwin` marks an H/Y mismatch such as `MAT137Y5` when only `MAT137H5` exists.
 - `codeRepairs`: typography the parser repaired (glued `inCSC148H5`, spaced `PHL 245H5`, missing
   campus digit `PSY325H`, bare `GGR112` with exactly one catalog match), tokens it could not
-  recognise, and H/Y mismatches. Nothing is substituted except these unambiguous repairs.
-- `aliases`: `(formerly X)` renumberings found in requirement text, descriptions and notes. They are
+  recognise, and H/Y mismatches. Nothing is substituted except these unambiguous repairs. Course
+  fields report the field name; program requirement groups report the group id as `field`.
+- `aliases`: `(formerly X)` renumberings found in requirement text (course fields and program
+  groups), descriptions and notes, each with the code of its own clause as `current`. They are
   reported for review and never substituted.
+- `corequisiteMoves`: prerequisite codes marked "(may be taken as a corequisite)", with how the rest
+  of the field joins them (`alone`, `and`, `or`, or `unscoped`).
 - `programCodeFallbacks`: programs whose POSt code field holds no code (the Focus programs); their
   URL slug is used as the code and the program carries `codeSource: "url-slug"`.
 
@@ -140,18 +150,49 @@ Only `courseIds` become graph edges. Every code in requirement text gets one rol
 | --- | --- |
 | `courseIds` | Required references and alternatives that exist (same-campus catalog courses and any other-campus id) |
 | `unresolvedIds` | Same-campus codes absent from this calendar (retired or misprinted), including `(formerly X)` codes |
-| `mentionedIds` | Codes the text rules out (`except`, `excluding`, `other than`, `no longer be accepted` once that date has passed, `X cannot be substituted`), advisory codes (`Highly Recommended`, `Recommended Corequisite`, `(strongly recommended ...)`), codes in conditional sentences (`Students seeking ...`, `For students ...`) and codes in a field that says it has no prerequisites |
+| `mentionedIds` | Codes the text rules out (`except`, `excluding`, `other than`, `no longer be accepted` once that date has passed, `X cannot be substituted`), advisory codes (`Highly Recommended`, `Recommended Corequisite`, `X (strongly recommended ...)` when the brackets name no other code), codes in conditional sentences (`Students seeking ...`, `For students ...`) and codes in a field whose lead sentence is "This course has no prerequisite(s)" |
 
-The course's own code is always dropped. `(may be taken as a corequisite)` moves the annotated
-courses to the corequisite field. Advisory corequisite text is copied into `recommended`; the
-official field text always stays verbatim in `rawText`.
+The course's own code is always dropped from every list and pruned from the rule ("CSC209H5 or
+CSC369H5" in CSC369H5 leaves CSC209H5). In "CSC148H5 (CSC207H5 is highly recommended)" only
+CSC207H5 is advisory, and a preferred OR alternative ("A or B (highly recommended)") stays a
+choice. In exclusions a `(formerly X)` code stays an exclusion trigger. Advisory corequisite text
+is copied into `recommended`; the official field text always stays verbatim in `rawText`.
+
+`(may be taken as a corequisite)` moves the annotated courses to the corequisite field (taken
+before or together). Beside a required course ("A and B (may be ...)") the rest stays the
+prerequisite rule and B becomes a corequisite; alone, the prerequisite is `true`. When the rest is
+an alternative (PHL299Y5: "( PHL101H5 or ... ) (may be ...) or 4.0 credits") the prerequisite is
+`unknown` (the OR spans two fields) and the corequisite rule lists the courses plus an `unknown`
+leaf for the other alternative ("4.0 credits"), never `true` with edges.
 
 The rule AST only references `courseIds` (`npm run data:validate` enforces it). Codes absent from
-the calendar leave the AST: an OR alternative that only they satisfy is dropped, and a required one
-becomes an `unknown` leaf ("cites a course code that is not in the current calendar"), so the rest
-of an AND keeps its structure. In exclusions and recommendations they are simply removed (a
-retired course can no longer be taken). When the roles in one sentence cannot be separated safely,
-the whole rule becomes `unknown` with an explicit reason.
+the calendar leave the AST; `unresolvedIds` keeps them (the engine turns a record match into
+"unknown" / "may exclude"):
+
+| Fields | Absent codes in the rule |
+| --- | --- |
+| prerequisites, corequisites, program groups | An OR alternative made only of absent codes is dropped; any other absent code becomes an `unknown` leaf in place ("cites a course code that is not in the current calendar"), so an AND branch of an OR keeps its current courses (FAH385H5) |
+| exclusions | The same, but nothing except absent codes leaves no trigger (`true`); an absent half of an "A and B" pair stays an `unknown` leaf, so the current half alone never blocks for certain |
+| recommended | Only the absent atoms are removed; the rest of an AND stays (BIO407H5 keeps BIO206H5 and BIO304H5) |
+
+When the roles in one sentence cannot be separated safely, the whole rule becomes `unknown` with an
+explicit reason.
+
+### Program requirement groups
+
+Each list item or paragraph of a program's admission and completion fields is a group with its own
+official `rawText`. Context is never added to that text unless it is official wording that directly
+frames the item (the paragraph right before a list, an elective or group heading). Otherwise:
+
+- Admission groups get an `unknown` leaf with an empty text whose reason says admission depends on
+  the whole admission policy and route, so a group alone never certifies admission.
+- A cohort paragraph ("For students admitted ... in Fall 2026 and beyond") becomes the
+  `applicability` cohort and the label of the groups under it.
+- A stream paragraph followed directly by cohort pathways ("Enrolment in the UTMCIP stream ...
+  There are three admissions pathways") opens a section: every later group of the field (until
+  "Notes:", "all students have the same", or another stream paragraph) carries an `unknown` leaf
+  with that official paragraph and a label prefixed with the stream name ("UTMCIP stream · ...").
+  A stream paragraph followed by a list frames only that list.
 
 ## Frontend datasets
 
@@ -167,7 +208,9 @@ npm run data:build -- --check  # exit 1 when public/data/** is stale (CI runs th
 
 `RequirementLite.ids` are the edges; `mentioned` comes from `mentionedIds`; `unresolved` is
 `unresolvedIds` plus any same-campus id that is not a catalog course (moved out of `ids`, whatever
-list or rule leaf it came from). Program groups keep only highlightable ids. Registry entries carry
+list or rule leaf it came from). Program groups use the same split: `ids` (highlighted),
+`mentioned` and `unresolved`. `ProgramLite.codeSource` is `"url-slug"` for programs whose code is
+the page slug (the Focus programs), so the panel does not present it as a POSt code. Registry entries carry
 `startSubjects` from `data/campuses.json`; for an available campus, codes the dataset lacks are
 dropped with a warning.
 

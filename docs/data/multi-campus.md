@@ -885,7 +885,9 @@ for UTM and `body` for Arts & Science), `route_cue_re` and `cohort_cue_re` for p
 (no migration), UTSG uses `.cache/calendar/utsg/` and `.cache/supplementary/utsg/`, so a UTSG
 `--refresh` can never invalidate the UTM generation. Outputs go to `data/<data_dir>/`. All network
 access goes through `pipeline/http.py` (one browser-like User-Agent, one global throttle of at
-least 0.5 s between request starts, raised by any `robots.txt` crawl delay).
+least 0.5 s between request starts, raised by any `robots.txt` crawl delay). The first HTTP
+401/403/429 from any host stops the whole collection and saves the incomplete manifest; a missing
+`robots.txt` (404/410) allows everything.
 
 **Planned adapters are closed.** `collect()`, `build_catalog()` and the CLI raise
 `NotImplementedError` (the CLI exits with a usage error) for a `planned` campus unless

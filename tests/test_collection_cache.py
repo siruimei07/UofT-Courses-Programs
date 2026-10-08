@@ -1,4 +1,5 @@
 """Generation isolation, source integrity, pacing and file hygiene; no network required."""
+import argparse
 from contextlib import redirect_stdout
 from copy import deepcopy
 import dataclasses
@@ -9,6 +10,7 @@ from pathlib import Path
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from unittest.mock import Mock, patch
 
@@ -192,30 +194,55 @@ class Pacing(unittest.TestCase):
             self.assertEqual(http.session().headers['User-Agent'], http.USER_AGENT)
 
     def test_throttle_spaces_request_starts_across_threads(self):
-        clock = {'now': 100.0}
+        # The clock stands still; each thread starts when its own sleep ends.
+        local = threading.local()
         lock = threading.Lock()
         starts = []
 
         def sleep(seconds):
-            with lock:
-                clock['now'] += seconds
+            local.slept = seconds
 
-        throttle = http.Throttle(0.1, clock=lambda: clock['now'], sleep=sleep)
+        throttle = http.Throttle(0.1, clock=lambda: 100.0, sleep=sleep)
         self.assertEqual(throttle.interval, http.MIN_INTERVAL)
 
         def request():
+            local.slept = 0.0
             throttle.wait()
             with lock:
-                starts.append(clock['now'])
+                starts.append(100.0 + local.slept)
 
         threads = [threading.Thread(target=request) for _ in range(6)]
         for thread in threads:
             thread.start()
         for thread in threads:
             thread.join()
-        # Each call reserves its own slot; slots are MIN_INTERVAL apart whatever the thread order.
-        self.assertEqual(len(starts), 6)
-        self.assertGreaterEqual(throttle._next - 100.0, 6 * http.MIN_INTERVAL - 1e-9)
+        starts.sort()
+        self.assertEqual(starts, [100.0 + i * http.MIN_INTERVAL for i in range(6)])
+
+    def test_throttle_spaces_real_request_starts(self):
+        interval = 0.05
+        with patch.object(http, 'MIN_INTERVAL', interval):
+            throttle = http.Throttle(interval)
+        lock = threading.Lock()
+        starts = []
+
+        def request():
+            throttle.wait()
+            started = time.monotonic()
+            with lock:
+                starts.append(started)
+
+        first = time.monotonic()
+        threads = [threading.Thread(target=request) for _ in range(5)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        starts.sort()
+        # Five starts need four full intervals on the wall clock, whatever the thread scheduling
+        # (a sleep may overshoot, never undershoot beyond timer granularity).
+        self.assertEqual(len(starts), 5)
+        self.assertGreaterEqual(starts[-1] - first, 4 * interval - 0.005)
 
     def test_robots_crawl_delay_raises_the_shared_interval(self):
         throttle = http.Throttle(clock=lambda: 0.0, sleep=lambda seconds: None)
@@ -226,6 +253,143 @@ class Pacing(unittest.TestCase):
         self.assertEqual(throttle.interval, 2.0)
         self.assertTrue(http.allowed(robots, 'https://x/course/a'))
         self.assertEqual(len(evidence['contentHash']), 64)
+
+    def test_missing_robots_txt_allows_everything(self):
+        throttle = http.Throttle(clock=lambda: 0.0, sleep=lambda seconds: None)
+        for status in (404, 410):
+            response = Mock(status_code=status, url='https://x/robots.txt', content=b'<h1>Not found</h1>')
+            response.raise_for_status = Mock(side_effect=AssertionError('a missing robots.txt is not an error'))
+            with patch.object(http, 'session', return_value=Mock(get=Mock(return_value=response))):
+                robots, evidence = http.load_robots('https://x', throttle=throttle)
+            self.assertTrue(http.allowed(robots, 'https://x/course/a'))
+            self.assertEqual((evidence['httpStatus'], evidence['text']), (status, ''))
+
+    def test_refused_robots_txt_stops_before_anything_else(self):
+        response = Mock(status_code=403, url='https://x/robots.txt', content=b'')
+        with patch.object(http, 'session', return_value=Mock(get=Mock(return_value=response))):
+            with self.assertRaises(http.AccessRefused):
+                http.load_robots('https://x', throttle=http.Throttle(clock=lambda: 0.0, sleep=lambda seconds: None))
+
+    def test_a_stopped_collection_sends_nothing(self):
+        stop = threading.Event()
+        stop.set()
+        session = Mock()
+        with patch.object(http, 'session', return_value=session), patch.object(http.THROTTLE, 'wait'):
+            with self.assertRaises(http.CollectionStopped):
+                http.get('https://x/course/a', stop=stop)
+        session.get.assert_not_called()
+
+
+def page(html):
+    return f'<html><body><h1 class="page-title">{html}</h1></body></html>'
+
+
+class FakeCalendar:
+    """Answers every calendar URL; ``refuse`` maps URLs to a 401/403/429 status."""
+
+    def __init__(self, courses, refuse=None):
+        self.courses = courses
+        self.refuse = refuse or {}
+        self.requested = []
+        self.lock = threading.Lock()
+
+    def html(self, url):
+        if url == UTM.calendar_url:
+            return page('2026-2027 Calendar')
+        if url == UTM.course_search_url:
+            headers = ''.join(f'<h3 class="js-views-accordion-group-header">{code} • Course {code}</h3>' for code in self.courses)
+            return page('Course search') + headers
+        if url == UTM.program_search_url:
+            return (page('Program search') + '<div><h3 class="js-views-accordion-group-header">Synthetic Major - ERMAJ9999</h3>'
+                    '<a href="/program/ermaj9999">ERMAJ9999</a></div>')
+        return page(url)
+
+    def get(self, url, timeout=None, allow_redirects=True):
+        with self.lock:
+            self.requested.append(url)
+        if url.endswith('/robots.txt'):
+            return Mock(status_code=200, url=url, content=b'User-agent: *\nAllow: /')
+        if url in self.refuse:
+            return Mock(status_code=self.refuse[url], url=url)
+        return Mock(status_code=200, url=url, text=self.html(url))
+
+
+class AccessRefusal(unittest.TestCase):
+    """The first 401/403/429 stops the collection: no further request, manifest saved, non-zero exit."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.campus = dataclasses.replace(UTM, cache_dir=Path(self.temp.name))
+        self.args = argparse.Namespace(refresh=True, offline=False, workers=1, allow_planned=False)
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def collect(self, site):
+        with patch.object(http, 'session', return_value=site), patch.object(http.THROTTLE, 'wait'), \
+                redirect_stdout(io.StringIO()):
+            with self.assertRaises(http.AccessRefused):
+                collector.collect(self.args, self.campus)
+        return json.loads((self.campus.cache_dir / 'manifest.json').read_text(encoding='utf-8'))
+
+    def test_refused_detail_cancels_the_queue_and_saves_the_manifest(self):
+        courses = [f'CSC{100 + i}H5' for i in range(12)]
+        refused = UTM.course_url(courses[1])
+        site = FakeCalendar(courses, {refused: 429})
+        manifest = self.collect(site)
+        details = [url for url in site.requested if '/course/' in url or '/program/' in url]
+        # One worker: the first detail succeeds, the second is refused, nothing after it is sent.
+        self.assertEqual(details, [UTM.course_url(courses[0]), refused])
+        self.assertFalse(manifest['complete'])
+        self.assertIn('stoppedAt', manifest)
+        self.assertLessEqual({d['code'] for d in manifest['details']}, {courses[0]})
+        self.assertEqual(manifest['failures'], [{'kind': 'collection', 'url': refused, 'httpStatus': 429,
+                                                 'error': 'Access refused (HTTP 429); collection stopped'}])
+        self.assertEqual(len(manifest['directories']['course']['entities']), 12)
+        # Resumable: the generation is still the active one and is not marked complete.
+        active = json.loads((self.campus.cache_dir / 'active-run.json').read_text(encoding='utf-8'))
+        self.assertEqual((active['generationId'], active['status']), (manifest['generationId'], 'collecting'))
+
+    def test_refusal_with_several_workers_sends_at_most_the_requests_in_flight(self):
+        self.args.workers = 3
+        courses = [f'CSC{100 + i}H5' for i in range(40)]
+        site = FakeCalendar(courses, {UTM.course_url(courses[0]): 403})
+        manifest = self.collect(site)
+        details = [url for url in site.requested if '/course/' in url or '/program/' in url]
+        self.assertLessEqual(len(details), 3)
+        self.assertEqual(manifest['failures'][0]['httpStatus'], 403)
+
+    def test_refused_directory_page_stops_discovery(self):
+        site = FakeCalendar(['CSC108H5'], {UTM.course_search_url: 401})
+        manifest = self.collect(site)
+        self.assertFalse([url for url in site.requested if '/course/' in url or url == UTM.program_search_url])
+        self.assertEqual(manifest['failures'][0]['httpStatus'], 401)
+        self.assertEqual(manifest['directories'], {})
+
+    def test_cli_exits_non_zero_after_a_refusal(self):
+        with patch.object(collector, 'get_campus', return_value=self.campus), \
+                patch.object(collector, 'collect', side_effect=http.AccessRefused('Access refused: x (HTTP 429)')):
+            with self.assertRaises(SystemExit) as stopped:
+                collector.main(['--campus', 'utm'])
+        self.assertIsInstance(stopped.exception.code, str)
+        self.assertIn('resume later without --refresh', stopped.exception.code.lower())
+
+    def test_supporting_sources_stop_on_the_first_refusal(self):
+        source_cache = Path(self.temp.name) / 'calendar'
+        output = Path(self.temp.name) / 'supplementary'
+        write_json(source_cache / 'manifest.json', {'academicYear': '2026-2027', 'directories': {}, 'details': []})
+        seeds = sorted(UTM.base_url + '/' + slug for slug in UTM.seed_slugs)
+        site = FakeCalendar([], {seeds[0]: 429})
+        with patch.object(http, 'session', return_value=site), patch.object(http.THROTTLE, 'wait'), \
+                redirect_stdout(io.StringIO()):
+            code = supporting.main(['--source-cache', str(source_cache), '--output', str(output), '--workers', '1'])
+        self.assertEqual(code, supporting.STOPPED_EXIT)
+        self.assertEqual([url for url in site.requested if not url.endswith('robots.txt')], [seeds[0]])
+        manifest = json.loads((output / 'manifest.json').read_text(encoding='utf-8'))
+        self.assertEqual((manifest['stopped']['url'], manifest['stopped']['httpStatus']), (seeds[0], 429))
+        # The refused page and everything queued after it are listed as not fetched.
+        self.assertEqual(manifest['stopped']['unfetched'], seeds)
+        self.assertFalse(manifest['coverage']['completeWithinDeclaredBoundary'])
 
 
 if __name__ == '__main__':

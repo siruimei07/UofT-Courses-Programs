@@ -5,6 +5,9 @@ No scheduler and no historical database. Run from the repository root (npm run d
   python -I pipeline --campus utm --refresh                # annual collection (resumable)
   python -I pipeline --campus utm --parse-only             # offline re-parse into candidates
   python -I pipeline --campus utm --parse-only --accept    # publish to data/utm/
+
+The first HTTP 401/403/429 stops the whole collection: queued fetches are cancelled, the
+manifest is saved (incomplete) and the command exits non-zero. Resume later without --refresh.
 """
 from __future__ import annotations
 
@@ -16,6 +19,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import hashlib
 import re
 import sys
+import threading
 import time
 from urllib.parse import parse_qs, urljoin, urlparse
 from urllib.robotparser import RobotFileParser
@@ -42,6 +46,9 @@ class Fetcher:
         self.offline = offline
         self.started = self.active['startedAt']
         self.robots = RobotFileParser()
+        # Set by the first refusal (or any abort): no further request leaves this process.
+        self.stop = threading.Event()
+        self.refusal = None
         if not offline:
             self.robots, _ = http.load_robots(campus.base_url)
         self.failures = []
@@ -64,9 +71,11 @@ class Fetcher:
             raise RuntimeError('robots.txt disallows ' + url)
         for attempt in range(MAX_ATTEMPTS):
             try:
-                response = http.get(url)
-                if response.status_code in (401, 403, 429):
-                    raise PermissionError(f'Access refused: {url} ({response.status_code})')
+                response = http.get(url, stop=self.stop)
+                if response.status_code in http.REFUSED_STATUSES and self.refusal is None:
+                    self.refusal = {'url': url, 'httpStatus': response.status_code,
+                                    'error': f'Access refused (HTTP {response.status_code}); collection stopped'}
+                http.refuse(response, url, self.stop)
                 response.raise_for_status()
                 response.encoding = 'utf-8'
                 html = response.text
@@ -78,13 +87,22 @@ class Fetcher:
                 self.ensure_active()
                 write_json(path, item)
                 return item
-            except PermissionError:
+            except (http.AccessRefused, http.CollectionStopped):
                 raise
             except (requests.RequestException, ValueError):
                 if attempt == MAX_ATTEMPTS - 1:
                     raise
                 time.sleep(2 ** attempt)
         raise RuntimeError(url)
+
+
+STOPPING = (http.AccessRefused, http.CollectionStopped)
+
+
+def abort_pool(pool: ThreadPoolExecutor, fetcher: Fetcher):
+    """Stop now: queued fetches are cancelled and running ones send nothing more."""
+    fetcher.stop.set()
+    pool.shutdown(wait=True, cancel_futures=True)
 
 
 def discover(fetcher: Fetcher, kind, workers):
@@ -99,7 +117,8 @@ def discover(fetcher: Fetcher, kind, workers):
     while pending:
         batch = sorted(pending)
         pending.clear()
-        with ThreadPoolExecutor(max_workers=workers) as pool:
+        pool = ThreadPoolExecutor(max_workers=workers)
+        try:
             tasks = {pool.submit(fetcher.get, url): url for url in batch}
             for future in as_completed(tasks):
                 url = tasks[future]
@@ -151,6 +170,11 @@ def discover(fetcher: Fetcher, kind, workers):
                     linked = entry if number == 0 else entry + '?page=' + str(number)
                     if linked not in visited:
                         pending.add(linked)
+        except BaseException:
+            # A refusal or a malformed page ends the collection: queued pages are never fetched.
+            abort_pool(pool, fetcher)
+            raise
+        pool.shutdown()
         print(f'{kind} directory: {len(visited)} pages, {len(entities)} distinct entities', flush=True)
     pages.sort(key=lambda p: p['page'])
     if [p['page'] for p in pages] != list(range(len(pages))):
@@ -171,28 +195,27 @@ def collect(args, campus: Campus = UTM):
     manifest = {'generationId': fetcher.generation_id, 'startedAt': fetcher.started, 'academicYear': year,
                 'academicYearEvidence': {'url': campus.calendar_url, 'heading': title, 'contentHash': home['contentHash']},
                 'directories': {}, 'details': [], 'failures': [], 'supportingSources': []}
-    for slug in campus.supporting_slugs:
-        supporting = fetcher.get(campus.base_url + '/' + slug)
-        manifest['supportingSources'].append({key: supporting[key] for key in ['url', 'contentHash', 'fetchedAt']})
-    for kind in ['course', 'program']:
-        manifest['directories'][kind] = discover(fetcher, kind, args.workers)
-    fetcher.ensure_active()
-    write_json(directory / 'manifest.json', manifest)
-    entities = [(kind, entry) for kind, group in manifest['directories'].items() for entry in group['entities']]
-    with ThreadPoolExecutor(max_workers=args.workers) as pool:
-        tasks = {pool.submit(fetcher.get, entry['url']): (kind, entry) for kind, entry in entities}
-        for count, future in enumerate(as_completed(tasks), 1):
-            kind, entry = tasks[future]
-            try:
-                source = future.result()
-                manifest['details'].append({'kind': kind, 'code': entry['code'], 'url': entry['url'],
-                                            'contentHash': source['contentHash'], 'fetchedAt': source['fetchedAt'], 'status': 'ok'})
-            except Exception as exc:
-                manifest['failures'].append({'kind': kind, 'code': entry['code'], 'url': entry['url'], 'error': str(exc)})
-            if count % 100 == 0 or count == len(entities):
-                print(f'Details {count}/{len(entities)}; failures {len(manifest["failures"])}', flush=True)
-                fetcher.ensure_active()
-                write_json(directory / 'manifest.json', manifest)
+    try:
+        for slug in campus.supporting_slugs:
+            supporting = fetcher.get(campus.base_url + '/' + slug)
+            manifest['supportingSources'].append({key: supporting[key] for key in ['url', 'contentHash', 'fetchedAt']})
+        for kind in ['course', 'program']:
+            manifest['directories'][kind] = discover(fetcher, kind, args.workers)
+        fetcher.ensure_active()
+        write_json(directory / 'manifest.json', manifest)
+        collect_details(fetcher, manifest, args.workers)
+    except STOPPING as exc:
+        # Saved incomplete, so it is never parsed; a plain rerun resumes this generation.
+        refusal = fetcher.refusal or {'error': str(exc)}
+        manifest['failures'].append({'kind': 'collection', **refusal})
+        manifest['stoppedAt'] = now()
+        manifest['complete'] = False
+        fetcher.ensure_active()
+        write_json(directory / 'manifest.json', manifest)
+        if isinstance(exc, http.AccessRefused):
+            raise
+        # Another worker noticed the stop first; report the refusal itself.
+        raise http.AccessRefused(f"Access refused: {refusal.get('url')} (HTTP {refusal.get('httpStatus')}); collection stopped") from exc
     manifest['finishedAt'] = now()
     manifest['complete'] = not manifest['failures']
     fetcher.ensure_active()
@@ -200,6 +223,33 @@ def collect(args, campus: Campus = UTM):
     fetcher.active['status'] = 'complete' if manifest['complete'] else 'collecting'
     write_json(directory / 'active-run.json', fetcher.active)
     return manifest
+
+
+def collect_details(fetcher: Fetcher, manifest, workers):
+    """Fetch every discovered detail page; ordinary failures are recorded, a refusal stops everything."""
+    directory = fetcher.directory
+    entities = [(kind, entry) for kind, group in manifest['directories'].items() for entry in group['entities']]
+    pool = ThreadPoolExecutor(max_workers=workers)
+    try:
+        tasks = {pool.submit(fetcher.get, entry['url']): (kind, entry) for kind, entry in entities}
+        for count, future in enumerate(as_completed(tasks), 1):
+            kind, entry = tasks[future]
+            try:
+                source = future.result()
+                manifest['details'].append({'kind': kind, 'code': entry['code'], 'url': entry['url'],
+                                            'contentHash': source['contentHash'], 'fetchedAt': source['fetchedAt'], 'status': 'ok'})
+            except STOPPING:
+                raise
+            except Exception as exc:
+                manifest['failures'].append({'kind': kind, 'code': entry['code'], 'url': entry['url'], 'error': str(exc)})
+            if count % 100 == 0 or count == len(entities):
+                print(f'Details {count}/{len(entities)}; failures {len(manifest["failures"])}', flush=True)
+                fetcher.ensure_active()
+                write_json(directory / 'manifest.json', manifest)
+    except BaseException:
+        abort_pool(pool, fetcher)
+        raise
+    pool.shutdown()
 
 
 def build_parser():
@@ -232,7 +282,11 @@ def main(argv=None):
     if args.parse_only:
         manifest = load_manifest_for_parse(campus.cache_dir)
     else:
-        manifest = collect(args, campus)
+        try:
+            manifest = collect(args, campus)
+        except STOPPING as exc:
+            raise SystemExit(f'{exc}. Nothing more was requested; the incomplete manifest is saved in '
+                             f'{campus.cache_dir / "manifest.json"}. Resume later without --refresh.') from exc
     if not args.collect_only:
         from .calendar_parser import build_catalog
         build_catalog(manifest, campus, allow_decrease=args.allow_decrease, accept=args.accept,

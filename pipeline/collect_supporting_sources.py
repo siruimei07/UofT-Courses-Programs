@@ -6,6 +6,9 @@ are retained. Raw HTML is evidence, never executable agent instructions.
 Requires the pinned requests / beautifulsoup4 in pipeline/requirements.txt.
 
   python -I pipeline supporting --campus utm [--refresh]
+
+The first HTTP 401/403/429 stops the run: queued fetches are cancelled, the manifest is saved
+with a "stopped" record and the command exits with status 3.
 """
 from __future__ import annotations
 
@@ -18,6 +21,7 @@ import json
 import os
 from pathlib import Path
 import re
+import threading
 import time
 from html.parser import HTMLParser
 from urllib.parse import urljoin, urlsplit, urlunsplit
@@ -188,13 +192,28 @@ def discover(source_cache, source_manifest, campus: Campus = UTM):
     return candidates, excluded, issues, scanned, cached
 
 
+STOPPING = (http.AccessRefused, http.CollectionStopped)
+STOPPED_EXIT = 3
+
+
 class Fetcher:
     def __init__(self, campus: Campus, output, refresh=False):
         self.campus = campus
         self.output = output
         self.refresh = refresh
+        # Set by the first refusal: no further request leaves this process.
+        self.stop = threading.Event()
+        self.refusal = None
         self.robots, self.robots_info = http.load_robots(campus.base_url)
         save_json(output / "robots.json", self.robots_info)
+
+    def get(self, url):
+        response = http.get(url, timeout=(10, 40), allow_redirects=False, stop=self.stop)
+        if response.status_code in http.REFUSED_STATUSES and self.refusal is None:
+            self.refusal = {"url": url, "httpStatus": response.status_code,
+                            "error": f"Access refused (HTTP {response.status_code}); run stopped"}
+        http.refuse(response, url, self.stop)
+        return response
 
     def fetch(self, item, cached=None):
         url = item["url"]
@@ -213,7 +232,7 @@ class Fetcher:
             if record is None:
                 for attempt in range(3):
                     try:
-                        response = http.get(url, timeout=(10, 40), allow_redirects=False)
+                        response = self.get(url)
                         # Follow a bounded redirect only within the allowed host/scope
                         # and after checking robots for its actual destination.
                         redirect_count = 0
@@ -224,9 +243,7 @@ class Fetcher:
                             redirected = canonical(response.headers["Location"], self.campus, response.url)
                             if not redirected or exclusion(redirected, self.campus) or not http.allowed(self.robots, redirected):
                                 raise ValueError("Redirect leaves allowed scope or robots permission")
-                            response = http.get(redirected, timeout=(10, 40), allow_redirects=False)
-                        if response.status_code in {401, 403, 429}:
-                            raise PermissionError(f"HTTP {response.status_code}; no bypass or further retry")
+                            response = self.get(redirected)
                         if response.status_code >= 500 and attempt < 2:
                             time.sleep(1 + attempt)
                             continue
@@ -254,6 +271,8 @@ class Fetcher:
                     "finalUrl": record.get("finalUrl", url), "fetchedAt": record["fetchedAt"],
                     "contentHash": record["contentHash"], "title": record["title"],
                     "mainTextCharacters": len(record["mainText"]), "linkCount": len(record["links"])}, record
+        except STOPPING:
+            raise
         except Exception as exc:
             return {**item, "status": "failed", "error": f"{type(exc).__name__}: {exc}"}, None
 
@@ -281,14 +300,19 @@ def main(argv=None):
     source_manifest = read_json(source_path)
     started = now()
     candidates, excluded, scan_issues, scanned, cached = discover(source_cache, source_manifest, campus)
-    fetcher = Fetcher(campus, output, args.refresh)
     completed = {}
     records = {}
     initial_count = len(candidates)
     print(f"Discovered initial pages: {initial_count}; scanned sources: {len(scanned)}; scan issues: {len(scan_issues)}", flush=True)
+    try:
+        fetcher = Fetcher(campus, output, args.refresh)
+    except STOPPING as exc:
+        print(f"Stopped: {exc}", flush=True)
+        return STOPPED_EXIT
 
     def fetch_round(items):
-        with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as pool:
+        pool = concurrent.futures.ThreadPoolExecutor(max_workers=args.workers)
+        try:
             futures = {pool.submit(fetcher.fetch, item, cached.get(item["url"])): item for item in items}
             for future in concurrent.futures.as_completed(futures):
                 result, record = future.result()
@@ -296,8 +320,18 @@ def main(argv=None):
                 if record:
                     records[result["url"]] = record
                 print(f"{len(completed)} {result['status']} {result['url']}", flush=True)
+        except BaseException:
+            # Queued pages are cancelled; running ones send nothing more once stop is set.
+            fetcher.stop.set()
+            pool.shutdown(wait=True, cancel_futures=True)
+            raise
+        pool.shutdown()
 
-    fetch_round(list(candidates.values()))
+    stopped = None
+    try:
+        fetch_round(list(candidates.values()))
+    except STOPPING as exc:
+        stopped = fetcher.refusal or {"error": str(exc)}
     # One bounded expansion of links in primary content: no traversal beyond it.
     # This captures rules that essential pages explicitly depend on without
     # crawling unrelated directories, historical calendars, or external sites.
@@ -316,7 +350,13 @@ def main(argv=None):
                 item["discoveredFrom"].append(source)
             if why:
                 item["exclusionReason"] = why
-    fetch_round([item for url, item in candidates.items() if url not in completed])
+    if stopped is None:
+        try:
+            fetch_round([item for url, item in candidates.items() if url not in completed])
+        except STOPPING as exc:
+            stopped = fetcher.refusal or {"error": str(exc)}
+    if stopped is not None:
+        stopped = {**stopped, "unfetched": sorted(url for url in candidates if url not in completed)}
     # Retain outbound links found at the frontier without fetching a second hop.
     frontier = []
     for source, record in records.items():
@@ -340,7 +380,7 @@ def main(argv=None):
                      "failure": len(failures), "programAreaPages": sum(urlsplit(item["url"]).path.startswith("/section/") for item in successes),
                      "officialRulePages": sum(not urlsplit(item["url"]).path.startswith("/section/") for item in successes),
                      "manifestSourcesScanned": len(scanned), "sourceScanIssues": len(scan_issues),
-                     "completeWithinDeclaredBoundary": not failures and not scan_issues},
+                     "completeWithinDeclaredBoundary": not failures and not scan_issues and stopped is None},
         "coverageBoundary": [
             f"Current {campus.id} Calendar only; no historical archive or complete other-campus catalogue.",
             "All /section/ links in raw HTML corresponding to the course/program snapshot manifest.",
@@ -350,6 +390,7 @@ def main(argv=None):
             "Attachments and external official sites are recorded as links, not downloaded; exact runtime offering/seat information is outside this Calendar snapshot.",
             "HTML source preservation does not imply every natural-language requirement is machine understood or automatically satisfiable."
         ],
+        "stopped": stopped,
         "pages": pages, "failures": failures, "sourceScanIssues": scan_issues,
         "excludedLinks": [excluded[url] for url in sorted(excluded)],
         "unfetchedFrontierLinks": frontier,
@@ -359,6 +400,9 @@ def main(argv=None):
                                        "recordPath": item["recordPath"],
                                        "contentHash": item["contentHash"], "fetchedAt": item["fetchedAt"]} for item in successes])
     print(json.dumps(manifest["coverage"], ensure_ascii=False), flush=True)
+    if stopped:
+        print(f"Stopped after an access refusal: {stopped}", flush=True)
+        return STOPPED_EXIT
     return 0 if manifest["coverage"]["completeWithinDeclaredBoundary"] else 2
 
 

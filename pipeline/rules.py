@@ -13,6 +13,8 @@ from .campuses import CAMPUS_DIGITS
 # codes glued to a lower-case word ("inCSC148H5"), never a fragment of a longer token.
 COURSE_PATTERN = r'[A-Z]{3}(?:\d{3}|[A-Z]\d{2})[HY][0135]'
 COURSE_RE = re.compile(r'(?<![A-Z0-9])' + COURSE_PATTERN + r'(?![0-9A-Z])')
+# "(formerly X)": the course's earlier code (renumbering), never a requirement of its own.
+FORMERLY = re.compile(r'\s*\(\s*formerly:?\s+([^()]*)\)', re.I)
 
 
 def clean(text):
@@ -182,20 +184,25 @@ def parse_rule(raw):
 
 
 def exclusion_rule(text):
-    """A plain list names independent exclusion triggers, not all-at-once prerequisites."""
+    """A plain list names independent exclusion triggers, not all-at-once prerequisites.
+
+    A "(formerly X)" note names the same course under its old code, so X is one more trigger
+    of a plain list ("A (formerly B), C" excludes A, B and C).
+    """
     if not text:
         return {'kind': 'true'}
-    residual = COURSE_RE.sub('', text)
+    listed = FORMERLY.sub(lambda match: ' / ' + match[1] if COURSE_RE.search(match[1]) else match[0], text)
+    residual = COURSE_RE.sub('', listed)
     residual = re.sub(r'\b(?:or|and)\b|[\s,;/&+.]', '', residual, flags=re.I)
-    if not residual and refs(text):
-        if re.search(r'\band\b|[&+]', text, re.I) and re.search(r'\bor\b|/', text, re.I):
+    if not residual and refs(listed):
+        if re.search(r'\band\b|[&+]', listed, re.I) and re.search(r'\bor\b|/', listed, re.I):
             # "A or B and C or D": here "and" pairs courses, so a flat any-list would be wrong.
-            if not re.search(r'[,;/]', text):
-                rule = parse_rule(text)
+            if not re.search(r'[,;/]', listed):
+                rule = parse_rule(listed)
                 if not any(node['kind'] == 'unknown' for node in walk(rule)):
                     return rule
             return unknown(text, 'Exclusion joins courses with both "and" and "or"; the pairing needs manual confirmation')
-        return combine('any', [{'kind': 'course', 'courseId': reference} for reference in refs(text)])
+        return combine('any', [{'kind': 'course', 'courseId': reference} for reference in refs(listed)])
     # Parenthetical exceptions, transfer policies and combined-course exclusions
     # cannot safely use prerequisite expression semantics.
     return unknown(text, 'Context-dependent exclusion; confirm official credit restrictions')

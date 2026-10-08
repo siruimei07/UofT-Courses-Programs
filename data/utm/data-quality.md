@@ -2,7 +2,7 @@
 
 Academic year: 2026-2027. Evidence: the page heading `2026-2027 Calendar` at https://utm.calendar.utoronto.ca/.
 
-Collection finished: 2026-10-08T04:33:00+00:00 (UTC); parser 1.1.0.
+Collection finished: 2026-10-08T04:33:00+00:00 (UTC); parser 1.2.0.
 
 | Check | Result |
 | --- | ---: |
@@ -13,14 +13,14 @@ Collection finished: 2026-10-08T04:33:00+00:00 (UTC); parser 1.1.0.
 | Collection or parse failures | 0 |
 | Duplicate directory identities | 0 |
 | Non-empty prerequisite fields | 2041 |
-| Non-empty prerequisites fully structured | 955 |
-| Prerequisites with unknown clauses | 1086 |
-| Requirements (all fields and program groups) with unknown / applicability | 3792 |
+| Non-empty prerequisites fully structured | 954 |
+| Prerequisites with unknown clauses | 1087 |
+| Requirements (all fields and program groups) with unknown / applicability | 3794 |
 | Other-campus referenced ids | 1186 |
 | UTM ids not in the current calendar (never edges) | 387 |
-| Code typography repaired (glued / spaced / campus digit / suffix) | 2 / 2 / 6 / 4 |
-| Unrecognised code-like tokens / H-Y weight mismatches (reported only) | 3 / 156 |
-| "(formerly X)" aliases (reported, not substituted) | 11 |
+| Code typography repaired (glued / spaced / campus digit / suffix) | 2 / 2 / 7 / 5 |
+| Unrecognised code-like tokens / H-Y weight mismatches (reported only) | 3 / 410 |
+| "(formerly X)" aliases (reported, not substituted) | 14 |
 | Prerequisite reference cycles (SCCs) | 0 |
 
 Complete entity coverage does not mean every requirement is machine-understood. Whole program admission and completion rules stay `unknown` on purpose; requirement groups support sourced planning hints. Annual cutoffs, cohorts, streams, elective-pool allocation, permissions, high-school courses, complex credit combinations and other unparsed wording need manual confirmation. A simple exclusion list means any listed course triggers the exclusion; exclusions with contextual exceptions, or with "and" mixed into an "or" list, stay `unknown`.

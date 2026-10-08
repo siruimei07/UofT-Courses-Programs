@@ -16,16 +16,25 @@ from bs4 import BeautifulSoup, Tag
 from .cache import read_verified_source, validate_manifest_cache
 from .campuses import ROOT, UTM, Campus
 from .files import read_json, write_json, write_text
-from .references import NO_CONTEXT, CodeContext, analyse, combine_tails, guard, partition, prune_any, strip_unresolved
+from .references import (COREQ_OR_REASON, COREQ_PLACEMENT_REASON, NO_CONTEXT, Analysis, CodeContext, analyse, combine_tails,
+                         corequisite_rule, guard, partition, prune_any, prune_self, strip_unresolved)
 from .rules import COURSE_PATTERN, COURSE_RE, clean, combine, course_id, exclusion_rule, parse_rule, refs, unknown, walk
 
-PARSER_VERSION = '1.1.0'
+PARSER_VERSION = '1.2.0'
 REQUIREMENT_FIELDS = ['prerequisites', 'corequisites', 'exclusions', 'recommended', 'restrictions']
 OPTIONAL_COURSE_FIELDS = ['deliveryCampus', 'courseExperience', 'internationalComponent']
-# Retired codes are removed from these ASTs instead of becoming unknown leaves.
-DROP_UNRESOLVED_FIELDS = {'exclusions', 'recommended'}
+# How codes absent from the calendar leave each AST (references.strip_unresolved); default 'require'.
+STRIP_MODES = {'exclusions': 'trigger', 'recommended': 'drop'}
 FORMERLY_LEAD = re.compile(r'^\(?\s*formerly:?\s+(' + COURSE_PATTERN + r'(?:\s*(?:/|,|\bor\b|\band\b)\s*' + COURSE_PATTERN + r')*)', re.I)
 FRAGMENT = re.compile(r'[\W_]*(?:(?:and|or)\b[\W_]*)*', re.I)
+# Parent context of a program requirement group. The reason carries the explanation; the
+# official rawText is never prefixed with wording the calendar does not contain.
+CONTEXT_REASON = 'Parent requirement context, route or elective allocation must be confirmed'
+ADMISSION_REASON = ('Admission clause: admission depends on the complete program admission policy and route; '
+                    'manual confirmation required')
+ELECTIVE_LABEL = re.compile(r'\b(?:group\s+[A-Z0-9]|list\s+[A-Z0-9]|cluster\s+[A-Z0-9]|electives?|option|stream)\b', re.I)
+# "the UTMCIP stream" -> "UTMCIP stream": the capitalised name in front of the route word.
+STREAM_NAME = re.compile(r'(?:[A-Z(][\w&()-]*\s+){1,6}(?:stream|option)\b')
 
 
 class Audit:
@@ -48,15 +57,17 @@ class Audit:
                              'entityId': entity_id, 'field': field_name})
 
 
-def build_requirement(raw, url, analysis, ctx: CodeContext, rule):
+def build_requirement(raw, url, analysis: Analysis, ctx: CodeContext, rule):
     """Requirement dict: courseIds are the only references that may become graph edges."""
     resolved, unresolved = partition(analysis.required, ctx)
     alias_resolved, alias_unresolved = partition(analysis.alias_codes, ctx)
     demoted = {course_id(code) for code in analysis.demoted}
     if demoted:
         rule = prune_any(rule, demoted)
-    drop = analysis.field_name in DROP_UNRESOLVED_FIELDS
-    rule = guard(strip_unresolved(rule, unresolved, analysis.text, drop), resolved, analysis.text)
+    if analysis.self_code:
+        rule = prune_self(rule, course_id(analysis.self_code))
+    mode = STRIP_MODES.get(analysis.field_name, 'require')
+    rule = guard(strip_unresolved(rule, unresolved, analysis.text, mode), resolved, analysis.text)
     mentioned = sorted(({course_id(code) for code in analysis.mentioned} | set(alias_resolved)) - set(resolved) - set(unresolved))
     unresolved = sorted(set(unresolved) | set(alias_unresolved))
     result = {'rawText': raw, 'sourceUrl': url, 'rule': rule, 'courseIds': resolved}
@@ -71,15 +82,24 @@ def course_requirement(raw, url, ctx: CodeContext, field_name, code, parser=pars
     analysis = analyse(raw, ctx, field_name, code)
     if analysis.no_prerequisites or analysis.advisory:
         rule = {'kind': 'true'}
+    elif analysis.coreq_texts and analysis.coreq_join not in ('', 'and'):
+        # "X (may be taken as a corequisite) or Y": X moves to the corequisite field, so this
+        # field alone cannot say which alternative applies.
+        reason = COREQ_OR_REASON if analysis.coreq_join == 'or' else COREQ_PLACEMENT_REASON
+        rule = combine_tails(unknown(analysis.rule_text, reason), analysis.tails)
     else:
         rule = combine_tails(parser(analysis.rule_text), analysis.tails)
     return build_requirement(raw, url, analysis, ctx, rule), analysis
 
 
-def requirement(text, url, rule=None, ctx: CodeContext = NO_CONTEXT, field_name='group'):
-    """Generic requirement (program-level text) with negation masking and code repair."""
+def analysed_requirement(text, url, rule=None, ctx: CodeContext = NO_CONTEXT, field_name='group'):
+    """Generic requirement (program-level text) with negation masking and code repair, plus its analysis."""
     analysis = analyse(text, ctx, field_name)
-    return build_requirement(text, url, analysis, ctx, parse_rule(analysis.rule_text) if rule is None else rule)
+    return build_requirement(text, url, analysis, ctx, parse_rule(analysis.rule_text) if rule is None else rule), analysis
+
+
+def requirement(text, url, rule=None, ctx: CodeContext = NO_CONTEXT, field_name='group'):
+    return analysed_requirement(text, url, rule, ctx, field_name)[0]
 
 
 def field(soup, name):
@@ -124,12 +144,21 @@ def parse_course(entry, source_data, campus: Campus = UTM, ctx: CodeContext = NO
     elif pre_analysis.advisory_text:
         recommended = clean(recommended + ' ' + pre_analysis.advisory_text)
     if pre_analysis.corequisite:
-        # "(may be taken as a corequisite)": the courses are corequisite references.
+        # "(may be taken as a corequisite)": the courses are corequisite references (taken before
+        # or together). The corequisite rule keeps them as the official alternatives, next to any
+        # other alternative of the prerequisite text, instead of claiming nothing is required.
         moved, moved_unresolved = partition(pre_analysis.corequisite, ctx)
         core_req['courseIds'] = sorted(set(core_req['courseIds']) | set(moved))
         if moved_unresolved:
             core_req['unresolvedIds'] = sorted(set(core_req.get('unresolvedIds', [])) | set(moved_unresolved))
-        audit.corequisite_moves.append({'entityId': cid, 'courseIds': moved + moved_unresolved})
+        if 'mentionedIds' in core_req:
+            core_req['mentionedIds'] = [i for i in core_req['mentionedIds'] if i not in set(moved) | set(moved_unresolved)]
+            if not core_req['mentionedIds']:
+                del core_req['mentionedIds']
+        moved_rule = corequisite_rule(pre_analysis, ctx)
+        core_req['rule'] = moved_rule if core_req['rule']['kind'] == 'true' else combine('all', [core_req['rule'], moved_rule])
+        audit.corequisite_moves.append({'entityId': cid, 'courseIds': moved + moved_unresolved,
+                                        'placement': {'': 'alone', None: 'unscoped'}.get(pre_analysis.coreq_join, pre_analysis.coreq_join)})
     exclusions, exclusion_analysis = course_requirement(text_field(soup, fields['exclusions']), url, ctx, 'exclusions', code, exclusion_rule)
     recommended_req, recommended_analysis = course_requirement(recommended, url, ctx, 'recommended', code)
     restrictions, restriction_analysis = course_requirement(text_field(soup, fields['restrictions']), url, ctx, 'restrictions', code)
@@ -171,7 +200,19 @@ def list_items(node):
     return items
 
 
-def program_groups(item, url, code, category, campus: Campus = UTM, ctx: CodeContext = NO_CONTEXT):
+def stream_name(text):
+    """Short name of a stream section for labels ("UTMCIP stream"); the first sentence otherwise."""
+    match = STREAM_NAME.search(text)
+    return clean(match[0]) if match else re.split(r'(?<=[.:;])\s', text, maxsplit=1)[0][:80].rstrip()
+
+
+def program_groups(item, url, code, category, campus: Campus = UTM, ctx: CodeContext = NO_CONTEXT, audit: Audit | None = None):
+    """Leaf requirement groups of one program field, each with its official text and context.
+
+    Context never enters ``rawText`` unless it is official wording that directly frames the
+    item (the paragraph right before a list, an elective-list heading). Everything else is an
+    ``unknown`` leaf whose reason explains it, a cohort (``applicability``) or the label.
+    """
     if item is None:
         return []
     groups = []
@@ -179,6 +220,13 @@ def program_groups(item, url, code, category, campus: Campus = UTM, ctx: CodeCon
     cohort = ''
     pending = ''
     route = ''
+    # A stream paragraph followed by its own cohort pathways ("Enrolment in the UTMCIP stream
+    # ... There are three admissions pathways") frames every group up to the next reset.
+    section = None
+    children = [child for child in item.children if isinstance(child, Tag) and clean(child.get_text(' ', strip=True))]
+
+    def is_cohort(text):
+        return bool(re.search(campus.cohort_cue_re, text, re.I))
 
     def add(text, label, scoped):
         text = clean(text)
@@ -190,26 +238,30 @@ def program_groups(item, url, code, category, campus: Campus = UTM, ctx: CodeCon
         rule = parse_rule(analysis.rule_text)
         if analysis.demoted:
             rule = prune_any(rule, {course_id(c) for c in analysis.demoted})
-        context = route
-        if category == 'admission':
-            context = context or 'Admission clauses depend on the complete program admission policy and route.'
-        if re.search(r'\b(?:group\s+[A-Z0-9]|list\s+[A-Z0-9]|cluster\s+[A-Z0-9]|electives?|option|stream)\b', label, re.I):
-            context = context or label
-        if context and not text.startswith(context):
-            rule = combine('all', [unknown(context, 'Parent requirement context, route or elective allocation must be confirmed'), rule])
-            text = clean(context + ' ' + text)
+        # The paragraph right before a list, or an elective/group heading, is official framing text.
+        framing = route or ('' if category == 'admission' or not ELECTIVE_LABEL.search(label) else label)
+        contexts = []
+        if framing and not text.startswith(framing):
+            contexts.append(unknown(framing, CONTEXT_REASON))
+            text = clean(framing + ' ' + text)
+        if section and not text.startswith(section['text']):
+            contexts.append(unknown(section['text'], CONTEXT_REASON))
+            if not label.startswith(section['name']):
+                label = f"{section['name']} · {label}"
+        if category == 'admission' and not framing and not contexts:
+            contexts.append(unknown('', ADMISSION_REASON))
+        if contexts:
+            rule = combine('all', contexts + [rule])
         if scoped:
             rule = {'kind': 'applicability', 'cohort': scoped, 'rule': rule}
-        group = requirement(text, url, rule, ctx)
+        group, roles = analysed_requirement(text, url, rule, ctx)
         group.update({'id': f'{campus.id}:{code}:{category}:{len(groups) + 1}', 'label': label[:180], 'category': category})
+        if audit is not None:
+            audit.record(f'{campus.id}:{code}', group['id'], roles)
         groups.append(group)
 
-    for child in item.children:
-        if not isinstance(child, Tag):
-            continue
+    for index, child in enumerate(children):
         text = clean(child.get_text(' ', strip=True))
-        if not text:
-            continue
         if child.name in {'ol', 'ul'}:
             if pending:
                 add(pending + ' ' + text, heading, cohort)
@@ -218,9 +270,17 @@ def program_groups(item, url, code, category, campus: Campus = UTM, ctx: CodeCon
                 for number, entry in enumerate(list_items(child), 1):
                     add(entry, f'{heading} · {number}', cohort)
             continue
-        # A stream/co-op/option paragraph frames only the list that directly follows it.
-        route = text if re.search(campus.route_cue_re, text, re.I) else ''
-        if re.search(campus.cohort_cue_re, text, re.I):
+        # A stream/co-op/option paragraph frames only the list that directly follows it, unless
+        # cohort pathways follow it (a section). A cohort paragraph is a cohort, never a route:
+        # its wording already is the cohort and the heading of the groups under it.
+        route = text if re.search(campus.route_cue_re, text, re.I) and not is_cohort(text) else ''
+        if route:
+            following = children[index + 1] if index + 1 < len(children) else None
+            opens = following is not None and following.name not in {'ol', 'ul'} and is_cohort(clean(following.get_text(' ', strip=True)))
+            section = {'text': text, 'name': stream_name(text)} if opens else None
+            if section:
+                heading = section['name']
+        if is_cohort(text):
             cohort = text
             heading = text
             add(text, heading, cohort)
@@ -228,6 +288,7 @@ def program_groups(item, url, code, category, campus: Campus = UTM, ctx: CodeCon
         if re.search(r'all students have the same', text, re.I):
             cohort = ''
             route = ''
+            section = None
             heading = text
             continue
         if re.fullmatch(r'notes?\s*:?', text, re.I):
@@ -235,6 +296,7 @@ def program_groups(item, url, code, category, campus: Campus = UTM, ctx: CodeCon
                 add(pending, heading, cohort)
             cohort = ''
             route = ''
+            section = None
             pending = ''
             heading = text
             continue
@@ -272,8 +334,8 @@ def parse_program(entry, source_data, campus: Campus = UTM, ctx: CodeContext = N
     program_type = type_match[1].title() if type_match else 'Other'
     admission = text_field(soup, fields['admission'])
     completion = text_field(soup, fields['completion'])
-    groups = program_groups(field(soup, fields['admission']), url, code, 'admission', campus, ctx)
-    groups += program_groups(field(soup, fields['completion']), url, code, 'completion', campus, ctx)
+    groups = program_groups(field(soup, fields['admission']), url, code, 'admission', campus, ctx, audit)
+    groups += program_groups(field(soup, fields['completion']), url, code, 'completion', campus, ctx, audit)
     def whole(text, category):
         # Full programs include overlap, subclauses, annual cutoffs and alternate
         # paths. Leaf groups support explainable recommendations, not certification.

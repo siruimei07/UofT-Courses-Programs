@@ -221,6 +221,46 @@ class PublishedSnapshot(unittest.TestCase):
                 self.assertFalse(len(text) > 40 and text[:half].strip() == text[half:].strip(), group['id'])
                 self.assertNotIn(text.strip().lower(), {'and', 'or', '-'}, group['id'])
 
+    def test_program_group_text_is_official_and_the_utmcip_section_keeps_its_context(self):
+        for program in self.catalog['programs']:
+            for group in program['groups']:
+                self.assertNotIn('Admission clauses depend', group['rawText'], group['id'])
+        program = next(p for p in self.catalog['programs'] if p['code'] == 'ERMAJ1688')
+        admission = {int(g['id'].rsplit(':', 1)[1]): g for g in program['groups'] if g['category'] == 'admission'}
+        self.assertEqual(admission[27]['label'], 'UTMCIP stream')
+        for number in range(28, 46):
+            group = admission[number]
+            self.assertTrue(group['label'].startswith('UTMCIP stream · '), group['id'])
+            self.assertNotIn('UTMCIP', group['rawText'], group['id'])
+            self.assertTrue(any(n['kind'] == 'unknown' and n['text'].startswith('Enrolment in the UTMCIP stream')
+                                for n in walk(group['rule'])), group['id'])
+        for number in range(1, 27):
+            self.assertNotIn('UTMCIP', json.dumps(admission[number]), number)
+
+    def test_program_group_code_repairs_are_reported(self):
+        repairs = {(r['entityId'], r['field'], r['kind'], r.get('code')) for r in self.report['codeRepairs']}
+        self.assertIn(('UTM:ERMIN1425', 'UTM:ERMIN1425:admission:1', 'campusDigit', 'ENV100Y5'), repairs)
+        self.assertIn(('UTM:ERSPE0727', 'UTM:ERSPE0727:admission:2', 'suffix', 'SOC109H5'), repairs)
+
+    def test_retired_codes_keep_and_branches_and_recommendation_conjuncts(self):
+        rule = self.courses['FAH385H5']['prerequisites']['rule']
+        self.assertEqual(rule['kind'], 'any')
+        self.assertEqual(rule_course_ids(rule), set(self.courses['FAH385H5']['prerequisites']['courseIds']))
+        self.assertEqual(self.courses['BIO407H5']['recommended']['rule'],
+                         {'kind': 'all', 'items': [{'kind': 'course', 'courseId': 'UTM:BIO206H5'},
+                                                   {'kind': 'course', 'courseId': 'UTM:BIO304H5'}]})
+        for code in ['CHM462H5', 'JGE378H5']:
+            self.assertNotEqual(self.courses[code]['recommended']['rule'], {'kind': 'true'}, code)
+
+    def test_corequisite_alternatives_and_formerly_exclusion_triggers(self):
+        coreq = self.courses['PHL299Y5']['corequisites']
+        self.assertEqual(coreq['rule']['kind'], 'any')
+        self.assertEqual(coreq['rule']['items'][-1], {'kind': 'unknown', 'text': '4.0 credits', 'reason': coreq['rule']['items'][-1]['reason']})
+        self.assertEqual(rule_course_ids(coreq['rule']), set(coreq['courseIds']))
+        self.assertIn('UTSG:FAH286H1', self.courses['FAH292H5']['exclusions']['courseIds'])
+        self.assertIn({'formerly': 'UTSG:FAH286H1', 'current': 'UTM:FAH248H5'},
+                      [{'formerly': a['formerly'], 'current': a['current']} for a in self.report['aliases']])
+
     def test_program_cohort_and_cutoff_provenance_survive(self):
         program = next(p for p in self.catalog['programs'] if p['code'] == 'ERMAJ1688')
         self.assertIn('determined annually', program['admission']['rawText'])
