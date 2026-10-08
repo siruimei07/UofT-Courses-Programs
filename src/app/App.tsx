@@ -5,10 +5,11 @@ import type { CampusEntry, CampusRegistry, GraphDataset, ProgramsDataset } from 
 import { createEngine } from '../domain/engine'
 import type { GraphCanvasHandle, PlotSize } from '../graph/canvas-types'
 import { GraphCanvas } from '../graph/GraphCanvas'
+import { levelGroup } from '../graph/presentation'
 import { createLabelMeasure, useTextMetricsVersion } from '../graph/text'
 import { buildTopology } from '../graph/topology'
 import { useStrings } from '../i18n'
-import { CardHead, cardMeta } from '../ui/CardHead'
+import { CardHead, cardMeta, type ProgramContext } from '../ui/CardHead'
 import { Footer } from '../ui/Footer'
 import { Header, type HeaderSearchProps } from '../ui/Header'
 import { LegendStrip } from '../ui/LegendStrip'
@@ -35,14 +36,19 @@ type ViewRequest = { kind: 'frame'; target: 'chain' | 'program' } | { kind: 'lan
 
 const NO_TONES = new Map()
 
-/** 000-level courses count as 100-level (presentation's level filter). */
-const levelGroup = (level: number) => Math.max(100, Math.floor(level / 100) * 100)
+/** The below-1280 notice; dismissing it holds across the loading and ready shells. */
+interface NarrowNotice {
+  dismissed: boolean
+  dismiss(): void
+}
 
 export function App() {
   const data = useCampusData()
   const breakpoint = useBreakpoint()
-  if (data.status === 'ready') return <Workspace key={data.campus.id} {...data} breakpoint={breakpoint} />
-  return <LoadingShell data={data} breakpoint={breakpoint} />
+  const [noticeDismissed, setNoticeDismissed] = useState(false)
+  const notice = useMemo<NarrowNotice>(() => ({ dismissed: noticeDismissed, dismiss: () => setNoticeDismissed(true) }), [noticeDismissed])
+  if (data.status === 'ready') return <Workspace key={data.campus.id} {...data} breakpoint={breakpoint} notice={notice} />
+  return <LoadingShell data={data} breakpoint={breakpoint} notice={notice} />
 }
 
 // ---------------------------------------------------------------------------
@@ -50,6 +56,7 @@ export function App() {
 
 interface ShellProps {
   breakpoint: Breakpoint
+  notice: NarrowNotice
   registry: CampusRegistry | null
   campus: CampusEntry | null
   dataset: GraphDataset | null
@@ -60,41 +67,50 @@ interface ShellProps {
   overlay?: ReactNode
 }
 
+/** Moves keyboard focus to the map region (GraphCanvas's root), or the graph area while loading. */
 function focusGraph(): void {
   const area = document.getElementById('graph-area')
-  const target = area?.querySelector<HTMLElement>('[tabindex="0"]') ?? area
-  target?.focus()
+  const target = area?.querySelector<HTMLElement>('.gc-root') ?? area
+  target?.focus({ preventScroll: true })
 }
 
-function Shell({ breakpoint, registry, campus, dataset, search, programTitle, children, overlay }: ShellProps) {
+function Shell({ breakpoint, notice, registry, campus, dataset, search, programTitle, children, overlay }: ShellProps) {
   const t = useStrings(commonStrings)
-  const [noticeDismissed, setNoticeDismissed] = useState(false)
   return (
     <div className="app" data-bp={breakpoint}>
       <a className="skip-link" href="#graph-area" onClick={event => { event.preventDefault(); focusGraph() }}>{t.skipToMap}</a>
       <Header breakpoint={breakpoint} registry={registry} campus={campus} dataset={dataset} search={search} programTitle={programTitle} />
-      {breakpoint === 'narrow' && !noticeDismissed && (
+      {breakpoint === 'narrow' && !notice.dismissed && (
         <div className="narrow-notice" role="note">
           <span>{t.narrowNotice}</span>
-          <button type="button" className="btn btn-small" onClick={() => setNoticeDismissed(true)}>{t.dismiss}</button>
+          <button type="button" className="btn btn-small" onClick={notice.dismiss}>{t.dismiss}</button>
         </div>
       )}
-      <main className="main">{children}</main>
+      <main className="main">
+        <h1 className="sr-only">{t.product}</h1>
+        {children}
+      </main>
       <Footer campus={campus} dataset={dataset} />
       {overlay}
     </div>
   )
 }
 
-function LoadingShell({ data, breakpoint }: { data: Exclude<CampusData, { status: 'ready' }>; breakpoint: Breakpoint }) {
+interface LoadingShellProps {
+  data: Exclude<CampusData, { status: 'ready' }>
+  breakpoint: Breakpoint
+  notice: NarrowNotice
+}
+
+function LoadingShell({ data, breakpoint, notice }: LoadingShellProps) {
   const t = useStrings(commonStrings)
   const searchRef = useRef<HTMLInputElement>(null)
   const search: HeaderSearchProps = {
-    courseIndex: null, programIndex: null, tones: NO_TONES, inputRef: searchRef,
-    onWantPrograms: () => {}, onPickCourse: () => {}, onPickProgram: () => {},
+    courseIndex: null, programIndex: null, tones: NO_TONES, inputRef: searchRef, programsStatus: 'loading',
+    onWantPrograms: () => {}, onRetryPrograms: () => {}, onPickCourse: () => {}, onPickProgram: () => {},
   }
   return (
-    <Shell breakpoint={breakpoint} registry={data.registry} campus={data.campus} dataset={null} search={search} programTitle={null}>
+    <Shell breakpoint={breakpoint} notice={notice} registry={data.registry} campus={data.campus} dataset={null} search={search} programTitle={null}>
       <section className="graph-card" aria-busy={data.status === 'loading'}>
         <div className="graph-area graph-area-state" id="graph-area" tabIndex={-1}>
           {data.status === 'loading'
@@ -120,9 +136,10 @@ interface WorkspaceProps {
   campus: CampusEntry
   dataset: GraphDataset
   breakpoint: Breakpoint
+  notice: NarrowNotice
 }
 
-function Workspace({ registry, campus, dataset, breakpoint }: WorkspaceProps) {
+function Workspace({ registry, campus, dataset, breakpoint, notice }: WorkspaceProps) {
   const focusId = useApp(state => state.focusId)
   const programId = useApp(state => state.programId)
   const record = useApp(state => state.record)
@@ -148,9 +165,9 @@ function Workspace({ registry, campus, dataset, breakpoint }: WorkspaceProps) {
     return createLabelMeasure(topology, dataset)
   }, [topology, dataset, metricsVersion])
 
-  // Programs (lazy).
+  // Programs (lazy): loaded on the first search focus or keystroke, or for a program in the hash.
   const [programsWanted, setProgramsWanted] = useState(false)
-  const programs = usePrograms(campus, programsWanted || programId !== null)
+  const { data: programs, status: programsStatus, retry: retryPrograms } = usePrograms(campus, programsWanted || programId !== null)
   const programsRef = useRef<ProgramsDataset | null>(programs)
   useEffect(() => { programsRef.current = programs }, [programs])
   const programIndex = useMemo(() => (programs ? buildProgramIndex(programs.programs) : null), [programs])
@@ -159,11 +176,9 @@ function Workspace({ registry, campus, dataset, breakpoint }: WorkspaceProps) {
     // A program id from the hash or a stored home that this calendar does not have.
     if (programs && programId && !program) actions.selectProgram(null)
   }, [programs, programId, program])
-  const programIds = useMemo(() => {
-    if (!program) return null
-    const ids = engine.programProgress(program, record).courseIds
-    return ids.length ? new Set(ids) : null
-  }, [engine, program, record])
+  // The id list only changes with the program: record edits must not rebuild the whole map.
+  const programKey = useMemo(() => (program ? engine.programProgress(program, record).courseIds.join('\n') : ''), [engine, program, record])
+  const programIds = useMemo(() => (programKey ? new Set(programKey.split('\n')) : null), [programKey])
 
   // Graph pipeline.
   const [plot, setPlot] = useState<PlotSize | null>(null)
@@ -297,19 +312,24 @@ function Workspace({ registry, campus, dataset, breakpoint }: WorkspaceProps) {
 
   const subjectPicker = usePopover()
 
+  // After a pick, focus moves to the map so keyboard users keep their place.
   const search: HeaderSearchProps = {
     courseIndex,
     programIndex,
     tones,
     inputRef: searchRef,
+    programsStatus,
     onWantPrograms: () => { if (!autoFocusing.current) setProgramsWanted(true) },
+    onRetryPrograms: retryPrograms,
     onPickCourse: id => {
       if (id === appStore.get().focusId) requestView({ kind: 'frame', target: 'chain' })
       else actions.selectCourse(id)
+      focusGraph()
     },
     onPickProgram: id => {
       actions.selectCourse(null)
       actions.selectProgram(id)
+      focusGraph()
     },
   }
 
@@ -330,13 +350,19 @@ function Workspace({ registry, campus, dataset, breakpoint }: WorkspaceProps) {
   )
   const programTitle = program ? programShortTitle(program) : null
   const programCourses = useMemo(() => presentation.inProgram.filter(Boolean).length, [presentation])
+  // A program from the hash or a stored home shows its context even while programs.json is
+  // loading or failed ("Programs unavailable — retry"), instead of nothing at all.
+  const programContext: ProgramContext | null = programTitle
+    ? { kind: 'ready', title: programTitle, courses: programCourses }
+    : programId && programsStatus !== 'ready'
+      ? { kind: 'waiting', status: programsStatus, onRetry: retryPrograms }
+      : null
 
   const showStart = Boolean(landing?.showStart) && !onboarded
   const startSubjects = useMemo(() => {
     const info = new Map(dataset.subjects.map(subject => [subject.code, subject]))
-    const limit = breakpoint === 'compact' || breakpoint === 'narrow' ? 4 : 6
-    return (campus.startSubjects ?? []).flatMap(code => info.get(code) ?? []).slice(0, limit)
-  }, [dataset, campus, breakpoint])
+    return (campus.startSubjects ?? []).flatMap(code => info.get(code) ?? [])
+  }, [dataset, campus])
 
   const levelCounts = useMemo(() => {
     const counts = new Map<number, number>()
@@ -361,7 +387,7 @@ function Workspace({ registry, campus, dataset, breakpoint }: WorkspaceProps) {
 
   return (
     <Shell
-      breakpoint={breakpoint} registry={registry} campus={campus} dataset={dataset} search={search} programTitle={programTitle}
+      breakpoint={breakpoint} notice={notice} registry={registry} campus={campus} dataset={dataset} search={search} programTitle={programTitle}
       overlay={helpOpen && <ShortcutsHelp onClose={closeHelp} />}
     >
       <section className="graph-card" aria-labelledby="card-title">
@@ -369,8 +395,8 @@ function Workspace({ registry, campus, dataset, breakpoint }: WorkspaceProps) {
           breakpoint={breakpoint}
           meta={meta}
           focus={focusCourse && readout ? { course: focusCourse, readout } : null}
-          program={!focusCourse && program && programTitle ? { title: programTitle, courses: programCourses } : null}
-          start={showStart && !focusCourse && !program
+          program={focusCourse ? null : programContext}
+          start={showStart && !focusCourse && !programContext
             ? <StartStrip subjects={startSubjects} tones={tones} onJump={jumpToSubject} onAllSubjects={() => subjectPicker.setOpen(true)} />
             : null}
           onDetails={() => actions.showPanel('course')}
@@ -411,7 +437,12 @@ function Workspace({ registry, campus, dataset, breakpoint }: WorkspaceProps) {
             onPlotSize={onPlotSize}
           />
         </div>
-        <LegendStrip mode={legendMode} recordActive={record.size > 0} />
+        <LegendStrip
+          mode={legendMode}
+          recordActive={record.size > 0}
+          listedOnly={readout?.needs.kind === 'unknown'}
+          unrelatedHidden={hideUnrelated && presentation.dimming}
+        />
       </section>
       <div className="panel-col" data-collapsed={panelCollapsed || undefined}>
         <RightPanel {...panelProps} />

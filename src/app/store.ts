@@ -101,7 +101,9 @@ export function initialAppState(): AppState {
 export const appStore = createStore<AppState>(initialAppState())
 
 export function useApp<S>(selector: (state: AppState) => S): S {
-  return useSyncExternalStore(appStore.subscribe, () => selector(appStore.get()))
+  const snapshot = () => selector(appStore.get())
+  // The server snapshot lets markup tests render components with react-dom/server.
+  return useSyncExternalStore(appStore.subscribe, snapshot, snapshot)
 }
 
 // ---------------------------------------------------------------------------

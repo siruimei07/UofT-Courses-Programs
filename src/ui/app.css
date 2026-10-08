@@ -156,14 +156,19 @@ kbd {
   border-radius: 999px; background: var(--ink); color: var(--ink-inverse);
   font-size: 11.5px; font-weight: 600; font-variant-numeric: tabular-nums;
 }
+/* The active program's name is the one header item that gives way: it shrinks (ellipsis, full name
+   in the tooltip) before the language and theme controls could be pushed out of the window. */
 .hbtn-group {
-  flex: none; display: inline-flex; align-items: center; height: 32px;
+  flex: 0 1 auto; min-width: 0; display: inline-flex; align-items: center; height: 32px;
   border: 1px solid var(--line); border-radius: 7px; background: var(--surface);
 }
-.hbtn-group .hbtn { height: 30px; border: 0; padding: 0 6px 0 12px; background: transparent; border-radius: 6px 0 0 6px; }
+.hbtn-group .hbtn {
+  flex: 0 1 auto; min-width: 0; height: 30px; border: 0; padding: 0 6px 0 12px; background: transparent; border-radius: 6px 0 0 6px;
+}
 .hbtn-group .hbtn:hover { background: var(--hover); }
+.hbtn-group .hbtn-clear { flex: none; }
 .hbtn-program svg { color: var(--prog); }
-.program-name { display: block; max-width: 160px; overflow: hidden; text-overflow: ellipsis; }
+.program-name { display: block; min-width: 24px; max-width: 160px; overflow: hidden; text-overflow: ellipsis; }
 .hbtn-clear {
   display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px; margin: 0 8px 0 2px;
   padding: 0; border: 0; border-radius: 4px; background: transparent; color: var(--ink-3); cursor: pointer;
@@ -245,13 +250,13 @@ mark.hit { background: none; color: var(--ink); font-weight: 600; }
 
 .start-strip { flex: 1 1 auto; min-width: 0; display: flex; align-items: center; gap: 6px; align-self: center; }
 .start-text { flex: 0 1 auto; min-width: 0; margin-right: 4px; overflow: hidden; text-overflow: ellipsis; font-size: 13px; color: var(--ink-2); }
-.chip.chip-subject { height: 26px; padding: 0 10px; gap: 6px; font-weight: 600; }
-.chip-swatch { flex: none; width: 8px; height: 8px; border-radius: 2px; }
+.chip.chip-subject { height: 26px; padding: 0 5px; }
 .link-button {
   flex: none; padding: 0 4px; border: 0; background: none; color: var(--ink); font-size: 13px; cursor: pointer;
   text-decoration: underline; text-underline-offset: 2px; text-decoration-color: var(--ink-3);
 }
 .link-button:hover { text-decoration-color: var(--ink); }
+.link-button.link-inline { padding: 0; font-size: inherit; }
 
 /* ---------------------------------------------------------------- buttons and chips (11.1) */
 

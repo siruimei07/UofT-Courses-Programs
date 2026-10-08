@@ -1,13 +1,10 @@
-// "Chain titles: auto" (design-spec 8.2): the chain keeps transitive titles only when its box fits
-// the plot at the auto-frame floor with the 10.2 margins. Pure, so the decision is testable.
+// The chain box of "chain titles: auto" (design-spec 8.2): the chain keeps transitive titles only
+// when its box fits the plot at the auto-frame floor with the 10.2 margins. The floor and margins
+// come from the renderer's viewport module, so both sides always use the same numbers.
 import type { PlotSize } from '../graph/canvas-types'
 import type { Geometry, NodeRole, Presentation } from '../graph/types'
+import { FRAME_MARGIN_X, FRAME_ZOOM_FLOOR } from '../graph/viewport'
 
-/** Automatic framing never zooms below this (8.12). */
-export const FRAME_ZOOM_FLOOR = 0.92
-/** 10.2: 16 px left and right, 20 px top and bottom. */
-export const FRAME_MARGIN_X = 16
-export const FRAME_MARGIN_Y = 20
 /** 8.12: the chain box is padded by 12 px. */
 const BOX_PAD = 12
 /** Focus knockout radius (7.1) and the largest chain dot radius plus its ring. */

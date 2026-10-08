@@ -1,10 +1,15 @@
 // Header search (design-spec 6.2 item 6 and 6.9.1): a combobox over courses and programs with
-// arrow-key navigation. Programs load lazily the first time the user focuses the field.
+// arrow-key navigation. Programs load lazily the first time the user focuses the field or types;
+// a failed load says so and is retried on the next focus. The field's behaviour (Esc ladder,
+// program requests) is the pure state machine in app/searchInput.ts.
 import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent, type Ref } from 'react'
 import { searchCourses, searchPrograms, splitMatch, type CourseHit, type MatchRange, type ProgramHit } from '../app/search'
 import type { buildCourseIndex, buildProgramIndex } from '../app/search'
+import { listShowing, SEARCH_INPUT_IDLE, searchInputStep, type SearchInputEvent } from '../app/searchInput'
+import type { ProgramsStatus } from '../app/usePrograms'
 import { format, useStrings } from '../i18n'
 import { SearchIcon } from './icons'
+import { ProgramsNote } from './ProgramsNote'
 import { searchStrings } from './strings'
 import { SubjectBullet, type SubjectTone } from './SubjectBullet'
 
@@ -15,8 +20,13 @@ interface SearchBoxProps {
   programIndex: ReturnType<typeof buildProgramIndex> | null
   tones: ReadonlyMap<string, SubjectTone>
   inputRef: Ref<HTMLInputElement>
-  /** The user focused the field: time to fetch programs.json. */
+  /** State of programs.json; programs are searched once it is 'ready'. */
+  programsStatus: ProgramsStatus
+  /** The user focused the field or typed: time to fetch programs.json (safe to call repeatedly). */
   onWantPrograms(): void
+  /** Load programs.json again after a failure (next focus or the note's retry button). */
+  onRetryPrograms(): void
+  /** A pick: the shell selects it and moves focus to the map. */
   onPickCourse(id: string): void
   onPickProgram(id: string): void
 }
@@ -26,11 +36,11 @@ function Highlight({ text, match, field }: { text: string; match: MatchRange | n
   return <>{before}{hit && <mark className="hit">{hit}</mark>}{after}</>
 }
 
-export function SearchBox({ courseIndex, programIndex, tones, inputRef, onWantPrograms, onPickCourse, onPickProgram }: SearchBoxProps) {
+export function SearchBox(props: SearchBoxProps) {
+  const { courseIndex, programIndex, tones, inputRef, programsStatus, onWantPrograms, onRetryPrograms, onPickCourse, onPickProgram } = props
   const t = useStrings(searchStrings)
-  const [query, setQuery] = useState('')
-  const [open, setOpen] = useState(false)
-  const [active, setActive] = useState(0)
+  const [field, setField] = useState(SEARCH_INPUT_IDLE)
+  const { query, active } = field
   const rootRef = useRef<HTMLDivElement>(null)
   const listId = useId()
 
@@ -40,42 +50,42 @@ export function SearchBox({ courseIndex, programIndex, tones, inputRef, onWantPr
     ...courses.map(hit => ({ kind: 'course' as const, hit })),
     ...programs.map(hit => ({ kind: 'program' as const, hit })),
   ], [courses, programs])
-  const showList = open && query.trim().length > 0
+  const showList = listShowing(field)
+
+  const dispatch = (event: SearchInputEvent, input?: HTMLInputElement) => {
+    const { state, effects } = searchInputStep(field, event, programsStatus)
+    setField(state)
+    if (effects.wantPrograms) onWantPrograms()
+    if (effects.retryPrograms) onRetryPrograms()
+    if (effects.blur) input?.blur()
+  }
 
   useEffect(() => {
     if (!showList) return
     const onPointerDown = (event: PointerEvent) => {
-      if (!rootRef.current?.contains(event.target as Node)) setOpen(false)
+      if (!rootRef.current?.contains(event.target as Node)) setField(state => searchInputStep(state, { kind: 'outside' }, 'idle').state)
     }
     document.addEventListener('pointerdown', onPointerDown, true)
     return () => document.removeEventListener('pointerdown', onPointerDown, true)
   }, [showList])
 
-  const reset = () => {
-    setQuery('')
-    setOpen(false)
-    setActive(0)
-    rootRef.current?.querySelector('input')?.blur()
-  }
-
   const pick = (row: Row) => {
-    reset()
+    dispatch({ kind: 'pick' })
     if (row.kind === 'course') onPickCourse(row.hit.id)
     else onPickProgram(row.hit.id)
   }
 
   const onKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
     if (event.key === 'Escape') {
-      // Esc ladder rung 2: clear the text and leave the field; never clears the selection too.
+      // Handled here, so the global Esc ladder never takes a second rung on the same key.
       event.preventDefault()
       event.stopPropagation()
-      reset()
+      dispatch({ kind: 'escape' }, event.currentTarget)
       return
     }
     if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
       event.preventDefault()
-      setOpen(true)
-      if (rows.length) setActive(index => (index + (event.key === 'ArrowDown' ? 1 : -1) + rows.length) % rows.length)
+      dispatch({ kind: 'move', delta: event.key === 'ArrowDown' ? 1 : -1, rows: rows.length })
       return
     }
     if (event.key === 'Enter' && showList && rows.length) {
@@ -86,7 +96,6 @@ export function SearchBox({ courseIndex, programIndex, tones, inputRef, onWantPr
 
   const activeRow = showList && rows.length ? Math.min(active, rows.length - 1) : -1
   const optionId = (index: number) => `${listId}-option-${index}`
-  const loadingPrograms = programIndex === null
 
   return (
     <div className="search" ref={rootRef}>
@@ -106,8 +115,8 @@ export function SearchBox({ courseIndex, programIndex, tones, inputRef, onWantPr
         autoComplete="off"
         spellCheck={false}
         value={query}
-        onChange={event => { setQuery(event.target.value); setActive(0); setOpen(true) }}
-        onFocus={() => { onWantPrograms(); if (query.trim()) setOpen(true) }}
+        onChange={event => dispatch({ kind: 'change', value: event.target.value })}
+        onFocus={() => dispatch({ kind: 'focus' })}
         onKeyDown={onKeyDown}
       />
       <kbd className="search-kbd" title={t.shortcut}>/</kbd>
@@ -120,7 +129,7 @@ export function SearchBox({ courseIndex, programIndex, tones, inputRef, onWantPr
                   {courses.map((hit, index) => (
                     <div key={hit.id} id={optionId(index)} role="option" aria-selected={index === activeRow}
                       className={`result-row course-row${index === activeRow ? ' is-active' : ''}`}
-                      onMouseEnter={() => setActive(index)}
+                      onMouseEnter={() => dispatch({ kind: 'hover', index })}
                       onClick={() => pick({ kind: 'course', hit })}>
                       <span className="result-code" lang="en"><Highlight text={hit.code} match={hit.match} field="code" /></span>
                       <span className="result-title" lang="en"><Highlight text={hit.title} match={hit.match} field="title" /></span>
@@ -137,7 +146,7 @@ export function SearchBox({ courseIndex, programIndex, tones, inputRef, onWantPr
                     return (
                       <div key={hit.id} id={optionId(index)} role="option" aria-selected={index === activeRow}
                         className={`result-row program-row${index === activeRow ? ' is-active' : ''}`}
-                        onMouseEnter={() => setActive(index)}
+                        onMouseEnter={() => dispatch({ kind: 'hover', index })}
                         onClick={() => pick({ kind: 'program', hit })}>
                         <span className="result-title program-title" lang="en"><Highlight text={hit.title} match={hit.match} field="title" /></span>
                         <span className="result-meta" lang="en">{format(t.programMeta, { type: hit.type, code: hit.code })}</span>
@@ -148,8 +157,12 @@ export function SearchBox({ courseIndex, programIndex, tones, inputRef, onWantPr
               )}
             </div>
           )}
-          {rows.length === 0 && !loadingPrograms && <div className="search-note" role="status">{format(t.noMatch, { q: query.trim() })}</div>}
-          {loadingPrograms && <div className="search-note" role="status">{t.loadingPrograms}</div>}
+          {rows.length === 0 && (programsStatus === 'ready' || programsStatus === 'error') && (
+            <div className="search-note" role="status">{format(programsStatus === 'ready' ? t.noMatch : t.noCourseMatch, { q: query.trim() })}</div>
+          )}
+          {programsStatus !== 'ready' && (
+            <div className="search-note"><ProgramsNote status={programsStatus} onRetry={onRetryPrograms} /></div>
+          )}
         </div>
       )}
     </div>

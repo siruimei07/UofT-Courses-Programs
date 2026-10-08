@@ -1,13 +1,19 @@
 import { describe, expect, it } from 'vitest'
-import { boxFitsPlot, chainBox, FRAME_ZOOM_FLOOR } from '../src/app/framing'
+import { boxFitsPlot, chainBox } from '../src/app/framing'
 import { academicYearLabel, formatFetchDate } from '../src/app/format'
-import { anyGroupsOf, computeReadout, reachCount, shownCounts, unwrapRule } from '../src/app/readout'
+import {
+  anyGroupsOf, classifyRequirements, computeReadout, directPreds, reachCount, shownCounts, unwrapRule,
+} from '../src/app/readout'
 import type { GraphCourse } from '../src/data/schema'
 import type { Rule } from '../src/domain/types'
-import type { Geometry, NodeBox, NodeRole, Presentation, Topology } from '../src/graph/types'
+import { computePresentation } from '../src/graph/presentation'
+import { buildTopology } from '../src/graph/topology'
+import type { EdgeKind, Geometry, NodeBox, NodeRole, Presentation, Topology } from '../src/graph/types'
+import { FRAME_ZOOM_FLOOR } from '../src/graph/viewport'
+import { loadGraphDataset, presentationInput } from './helpers/dataset'
 
-/** Minimal topology: only the fields the readout helpers read. */
-function topology(ids: string[], edges: [number, number][]): Topology {
+/** Minimal topology: only the fields the readout helpers read. Edges are prerequisites unless marked. */
+function topology(ids: string[], edges: [number, number][], kinds: EdgeKind[] = []): Topology {
   const preds: number[][] = ids.map(() => [])
   const succs: number[][] = ids.map(() => [])
   for (const [from, to] of edges) {
@@ -17,7 +23,7 @@ function topology(ids: string[], edges: [number, number][]): Topology {
   return {
     nodes: ids.map((id, index) => ({ index, id, code: id.split(':')[1], title: id, subject: id.slice(4, 7), level: 100, lane: 0, band: 0, col: 0, order: index })),
     indexById: new Map(ids.map((id, index) => [id, index])),
-    edges: edges.map(([from, to]) => ({ from, to, kind: 'prereq' as const })),
+    edges: edges.map(([from, to], index) => ({ from, to, kind: kinds[index] ?? 'prereq' })),
     excludedEdges: [],
     preds,
     succs,
@@ -28,9 +34,10 @@ function topology(ids: string[], edges: [number, number][]): Topology {
   }
 }
 
-const course = (id: string, rule?: Rule): GraphCourse => ({
+const course = (id: string, rule?: Rule, coreq?: Rule): GraphCourse => ({
   id, code: id.split(':')[1], title: id, subject: 'MAT', level: 200, credits: 0.5,
   ...(rule ? { prereq: { text: 'official text', rule, ids: [] } } : {}),
+  ...(coreq ? { coreq: { text: 'official text', rule: coreq, ids: [] } } : {}),
 })
 
 const leaf = (code: string): Rule => ({ kind: 'course', courseId: `UTM:${code}` })
@@ -113,6 +120,103 @@ describe('computeReadout (design-spec 6.3)', () => {
 
   it('shownCounts counts visible courses and subjects with any visible course', () => {
     expect(shownCounts(topo, presentation(roles, [6, 7]))).toEqual({ courses: 6, subjects: 1 })
+  })
+})
+
+describe('corequisites (review bug 3)', () => {
+  // A, B prerequisites of F; C, D, E corequisites of F; Z → C (a corequisite's own prerequisite).
+  const ids2 = ['UTM:A100H5', 'UTM:B100H5', 'UTM:C100H5', 'UTM:D100H5', 'UTM:E100H5', 'UTM:F200H5', 'UTM:Z100H5']
+  const topo2 = topology(ids2, [[0, 5], [1, 5], [2, 5], [3, 5], [4, 5], [6, 2]], ['prereq', 'prereq', 'coreq', 'coreq', 'coreq', 'prereq'])
+  const prereqAB: Rule = { kind: 'all', items: [leaf('A100H5'), leaf('B100H5')] }
+
+  it('splits direct predecessors by edge kind', () => {
+    expect(directPreds(topo2, 5)).toEqual({ prereq: [0, 1], coreq: [2, 3, 4] })
+    expect(directPreds(topo2, -1)).toEqual({ prereq: [], coreq: [] })
+  })
+
+  it('"Needs" counts prerequisite edges only; corequisites are a separate summary', () => {
+    const anyCoreq: Rule = { kind: 'any', items: [leaf('C100H5'), leaf('D100H5'), leaf('E100H5')] }
+    const result = classifyRequirements(course(ids2[5], prereqAB, anyCoreq), topo2, 5)
+    expect(result.needs).toEqual({ kind: 'plain', direct: 2, total: 2 })
+    expect(result.coreqs).toEqual({ kind: 'oneOf', of: 3 })
+  })
+
+  it('detects any-groups in the corequisite rule as well', () => {
+    const mixed: Rule = { kind: 'all', items: [leaf('C100H5'), { kind: 'any', items: [leaf('D100H5'), leaf('E100H5')] }] }
+    expect(classifyRequirements(course(ids2[5], prereqAB, mixed), topo2, 5).coreqs).toEqual({ kind: 'alternatives', count: 3 })
+    const all: Rule = { kind: 'all', items: [leaf('C100H5'), leaf('D100H5'), leaf('E100H5')] }
+    expect(classifyRequirements(course(ids2[5], prereqAB, all), topo2, 5).coreqs).toEqual({ kind: 'plain', count: 3 })
+    const unknown: Rule = { kind: 'unknown', text: 'x', reason: 'y' }
+    expect(classifyRequirements(course(ids2[5], prereqAB, unknown), topo2, 5).coreqs).toEqual({ kind: 'unknown', count: 3 })
+  })
+
+  it('a prerequisite any-group never borrows corequisite leaves', () => {
+    const rule: Rule = { kind: 'any', items: [leaf('A100H5'), leaf('C100H5')] }
+    expect(anyGroupsOf(rule, topo2, 5)).toEqual([[0, 2]])
+    expect(anyGroupsOf(rule, topo2, 5, directPreds(topo2, 5).prereq)).toEqual([])
+    expect(classifyRequirements(course(ids2[5], rule), topo2, 5).needs).toEqual({ kind: 'plain', direct: 2, total: 2 })
+  })
+
+  it('a course with corequisites only still says no prerequisites are listed', () => {
+    const coreqOnly = topology(ids2, [[2, 5], [3, 5], [4, 5]], ['coreq', 'coreq', 'coreq'])
+    const result = classifyRequirements(course(ids2[5], undefined, { kind: 'any', items: [leaf('C100H5'), leaf('D100H5'), leaf('E100H5')] }), coreqOnly, 5)
+    expect(result.needs).toEqual({ kind: 'none' })
+    expect(result.coreqs).toEqual({ kind: 'oneOf', of: 3 })
+  })
+
+  it('computeReadout carries the corequisite summary', () => {
+    const readout = computeReadout(topo2, presentation(ids2.map(() => 'none')), 5, course(ids2[5], prereqAB, { kind: 'course', courseId: 'UTM:C100H5' }))
+    expect(readout.needs).toEqual({ kind: 'plain', direct: 2, total: 2 })
+    expect(readout.coreqs).toEqual({ kind: 'plain', count: 3 })
+  })
+})
+
+describe('readouts on the real UTM data', () => {
+  const { dataset } = loadGraphDataset()
+  const real = buildTopology(dataset)
+  const byCode = new Map(dataset.courses.map(entry => [entry.code, entry]))
+  const readoutOf = (code: string) => {
+    const entry = byCode.get(code)!
+    const focus = real.indexById.get(entry.id)!
+    return computeReadout(real, computePresentation(real, { ...presentationInput({ focusId: entry.id }) }), focus, entry)
+  }
+
+  it('MAT232H5 needs 1 of 4', () => {
+    const readout = readoutOf('MAT232H5')
+    expect(readout.needs.kind).toBe('oneOf')
+    expect(readout.needs).toMatchObject({ of: 4 })
+    expect(readout.coreqs).toEqual({ kind: 'none' })
+  })
+
+  it('ANT402H5 (top-level unknown) uses the neutral form', () => {
+    expect(readoutOf('ANT402H5').needs.kind).toBe('unknown')
+  })
+
+  it('MAT102H5 names no course on the map', () => {
+    expect(readoutOf('MAT102H5').needs).toEqual({ kind: 'offMap' })
+  })
+
+  it('ECO200Y5: 2 prerequisites, and its 5 MAT corequisites as "1 of 5"', () => {
+    const readout = readoutOf('ECO200Y5')
+    expect(readout.needs).toEqual({ kind: 'plain', direct: 2, total: 2 })
+    expect(readout.coreqs).toEqual({ kind: 'oneOf', of: 5 })
+  })
+
+  it('CHM395H5: one prerequisite, corequisite alternatives', () => {
+    const readout = readoutOf('CHM395H5')
+    expect(readout.needs).toMatchObject({ kind: 'plain', direct: 1 })
+    expect(readout.coreqs).toEqual({ kind: 'alternatives', count: 4 })
+  })
+
+  it('no course on the map counts a corequisite as a direct prerequisite', () => {
+    for (const entry of dataset.courses) {
+      const focus = real.indexById.get(entry.id)!
+      const { needs } = classifyRequirements(entry, real, focus)
+      const prereqIds = new Set(entry.prereq?.ids ?? [])
+      const direct = needs.kind === 'oneOf' ? needs.of : 'direct' in needs ? needs.direct : 0
+      const drawn = directPreds(real, focus).prereq.filter(index => prereqIds.has(real.nodes[index].id)).length
+      expect(direct, entry.code).toBe(drawn)
+    }
   })
 })
 

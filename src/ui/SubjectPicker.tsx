@@ -1,9 +1,10 @@
 // Subject picker (design-spec 6.9.2): visibility per subject, grouped by division in lane order,
 // with a filter field and a Jump action that also makes the subject the landing home. Pins are not
-// in V1 (owner decision 19.2).
+// in V1 (owner decision 19.2). Division headers use the lane column's localised division table.
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { actions, useApp } from '../app/store'
 import type { Division, SubjectInfo } from '../data/schema'
+import { DIVISION_STRINGS } from '../graph/strings'
 import type { Topology } from '../graph/types'
 import { format, formatNumber, useStrings } from '../i18n'
 import { subjectStrings } from './strings'
@@ -17,23 +18,33 @@ interface SubjectPickerProps {
   onJump(subject: string): void
 }
 
-interface Group {
+export interface SubjectGroup {
   id: string
   label: string
   rows: SubjectInfo[]
 }
 
-/** Subjects in lane (architecture) order, grouped by division. */
-export function groupSubjects(topology: Topology, subjects: readonly SubjectInfo[], divisions: readonly Division[], other: string): Group[] {
+/**
+ * Subjects in lane (architecture) order, grouped by division. Labels come from `localised` (the
+ * UI-language division table shared with the lane column), then the dataset's label, then `other`.
+ */
+export function groupSubjects(
+  topology: Topology,
+  subjects: readonly SubjectInfo[],
+  divisions: readonly Division[],
+  localised: Readonly<Record<string, string>>,
+  other: string,
+): SubjectGroup[] {
   const info = new Map(subjects.map(subject => [subject.code, subject]))
-  const labels = new Map(divisions.map(division => [division.id, division.label]))
-  const groups: Group[] = []
+  const known = new Map(divisions.map(division => [division.id, division.label]))
+  const labelOf = (id: string) => (Object.hasOwn(localised, id) ? localised[id] : known.get(id) ?? other)
+  const groups: SubjectGroup[] = []
   for (const lane of topology.lanes) {
     const subject = info.get(lane.subject) ?? { code: lane.subject, name: lane.name, department: lane.department, division: lane.division, courseCount: lane.nodes.length }
-    const id = labels.has(lane.division) ? lane.division : 'other'
+    const id = known.has(lane.division) || Object.hasOwn(localised, lane.division) ? lane.division : 'other'
     let group = groups.at(-1)
     if (!group || group.id !== id) {
-      group = { id, label: labels.get(id) ?? other, rows: [] }
+      group = { id, label: labelOf(id), rows: [] }
       groups.push(group)
     }
     group.rows.push(subject)
@@ -43,6 +54,7 @@ export function groupSubjects(topology: Topology, subjects: readonly SubjectInfo
 
 export function SubjectPicker({ topology, subjects, divisions, tones, onJump }: SubjectPickerProps) {
   const t = useStrings(subjectStrings)
+  const divisionLabels = useStrings(DIVISION_STRINGS)
   const lang = useApp(state => state.lang)
   const visible = useApp(state => state.subjects)
   const [filter, setFilter] = useState('')
@@ -50,7 +62,10 @@ export function SubjectPicker({ topology, subjects, divisions, tones, onJump }: 
 
   useEffect(() => { filterRef.current?.focus() }, [])
 
-  const groups = useMemo(() => groupSubjects(topology, subjects, divisions, t.other), [topology, subjects, divisions, t.other])
+  const groups = useMemo(
+    () => groupSubjects(topology, subjects, divisions, divisionLabels, t.other),
+    [topology, subjects, divisions, divisionLabels, t.other],
+  )
   const all = useMemo(() => groups.flatMap(group => group.rows.map(row => row.code)), [groups])
   const needle = filter.trim().toLowerCase()
   const shown = needle
@@ -82,7 +97,7 @@ export function SubjectPicker({ topology, subjects, divisions, tones, onJump }: 
           <div key={group.id} className="picker-group" role="group" aria-labelledby={`division-${group.id}`}>
             <div className="picker-division" id={`division-${group.id}`}>
               <span className="division-bar" style={{ background: divisionBar(group.id) }} aria-hidden="true" />
-              <span lang="en">{group.label}</span>
+              <span>{group.label}</span>
             </div>
             {group.rows.map(row => {
               const checked = visible === null || visible.has(row.code)
@@ -94,7 +109,10 @@ export function SubjectPicker({ topology, subjects, divisions, tones, onJump }: 
                   <SubjectBullet code={row.code} tone={tones.get(row.code)} />
                   <button type="button" className="picker-name" lang="en" title={format(t.jumpTitle, { name })}
                     onClick={() => onJump(row.code)}>{row.name}</button>
-                  <span className="picker-count" aria-label={format(t.count, { n: row.courseCount })}>{formatNumber(row.courseCount, lang)}</span>
+                  <span className="picker-count">
+                    <span aria-hidden="true">{formatNumber(row.courseCount, lang)}</span>
+                    <span className="sr-only">{format(t.count, { n: formatNumber(row.courseCount, lang) })}</span>
+                  </span>
                   <button type="button" className="picker-jump" title={format(t.jumpTitle, { name })} tabIndex={-1}
                     onClick={() => onJump(row.code)}>{t.jump}</button>
                 </div>

@@ -5,6 +5,7 @@ import { academicYearLabel, formatFetchDate } from '../app/format'
 import type { buildCourseIndex, buildProgramIndex } from '../app/search'
 import { actions, useApp, type Lang, type ThemePref } from '../app/store'
 import type { Breakpoint } from '../app/useBreakpoint'
+import type { ProgramsStatus } from '../app/usePrograms'
 import type { CampusEntry, CampusRegistry, GraphDataset } from '../data/schema'
 import { format, formatNumber, useStrings } from '../i18n'
 import { CampusSwitcher } from './CampusSwitcher'
@@ -19,7 +20,9 @@ export interface HeaderSearchProps {
   programIndex: ReturnType<typeof buildProgramIndex> | null
   tones: ReadonlyMap<string, SubjectTone>
   inputRef: Ref<HTMLInputElement>
+  programsStatus: ProgramsStatus
   onWantPrograms(): void
+  onRetryPrograms(): void
   onPickCourse(id: string): void
   onPickProgram(id: string): void
 }
@@ -124,7 +127,10 @@ export function Header({ breakpoint, registry, campus, dataset, search, programT
         label={t.myCourses}
         title={t.myCoursesTitle}
         badge={recordCount > 0 && (
-          <span className="count-badge" aria-label={format(t.myCoursesCount, { n: recordCount })}>{formatNumber(recordCount, lang)}</span>
+          <>
+            <span className="count-badge" aria-hidden="true">{formatNumber(recordCount, lang)}</span>
+            <span className="sr-only">{` ${format(t.myCoursesCount, { n: formatNumber(recordCount, lang) })}`}</span>
+          </>
         )}
         onClick={() => actions.showPanel('record')}
       />

@@ -66,7 +66,19 @@ function LegendItem({ item }: { item: Item }) {
 const GAP = 16
 const HINT_GAP = 24
 
-export function LegendStrip({ mode, recordActive }: { mode: LegendMode; recordActive: boolean }) {
+export interface LegendStripProps {
+  mode: LegendMode
+  recordActive: boolean
+  /**
+   * The selected course's prerequisite rule could not be parsed (7.4): its direct prerequisites are
+   * "listed in the requirement text", not known to be needed, and no fork is drawn.
+   */
+  listedOnly?: boolean
+  /** Hide unrelated is on: unrelated courses are not drawn, so they get no legend item. */
+  unrelatedHidden?: boolean
+}
+
+export function LegendStrip({ mode, recordActive, listedOnly = false, unrelatedHidden = false }: LegendStripProps) {
   const t = useStrings(legendStrings)
   const lang = useApp(state => state.lang)
   const stripRef = useRef<HTMLDivElement>(null)
@@ -74,22 +86,22 @@ export function LegendStrip({ mode, recordActive }: { mode: LegendMode; recordAc
   const more = usePopover()
 
   const items = useMemo<Item[]>(() => {
-    const base: Item[] = mode === 'chain'
+    const all: Array<Item | false> = mode === 'chain'
       ? [
         { glyph: 'selected', label: t.selected },
-        { glyph: 'pre-direct', label: t.neededDirectly },
+        { glyph: 'pre-direct', label: listedOnly ? t.listedDirectly : t.neededDirectly },
         { glyph: 'pre-trans', label: t.neededEarlier },
         { glyph: 'unl-direct', label: t.unlocksDirectly },
         { glyph: 'unl-trans', label: t.unlocksLater },
-        { glyph: 'mini', label: t.notInChain },
-        { glyph: 'fork', label: t.anyOf },
+        !unrelatedHidden && { glyph: 'mini', label: t.notInChain },
+        !listedOnly && { glyph: 'fork', label: t.anyOf },
         { glyph: 'coreq-chain', label: t.coreq },
       ]
       : mode === 'program'
         ? [
           { glyph: 'program', label: t.programCourse },
           { glyph: 'program-link', label: t.programLink },
-          { glyph: 'mini', label: t.notInProgram },
+          !unrelatedHidden && { glyph: 'mini', label: t.notInProgram },
         ]
         : [
           { glyph: 'course', label: t.course },
@@ -97,6 +109,7 @@ export function LegendStrip({ mode, recordActive }: { mode: LegendMode; recordAc
           { glyph: 'stub', label: t.stub },
           { glyph: 'coreq-faint', label: t.coreqShort },
         ]
+    const base = all.filter((item): item is Item => item !== false)
     if (!recordActive) return base
     return [
       ...base,
@@ -105,7 +118,7 @@ export function LegendStrip({ mode, recordActive }: { mode: LegendMode; recordAc
       { glyph: 'planned', label: t.planned },
       { glyph: 'available', label: t.available },
     ]
-  }, [mode, recordActive, t])
+  }, [mode, recordActive, listedOnly, unrelatedHidden, t])
 
   const [fit, setFit] = useState({ count: items.length, hint: true })
 

@@ -85,7 +85,9 @@ export function useToggles(hasFocus: boolean, programActive: boolean): ToggleSpe
 
 /**
  * Toggles sit inline in the wide frame (6.4) as long as they fit next to the other controls (a
- * 1700 px window with the panel open has no room); otherwise they move into the View menu.
+ * 1700 px window with the panel open has no room); otherwise they move into the View menu. The
+ * check re-runs when the bar or any of its controls changes size ("Subjects: 12 of 70", level
+ * counts, a language switch), not only on window resizes.
  */
 function useInlineToggles(wide: boolean, lang: string) {
   const barRef = useRef<HTMLDivElement>(null)
@@ -115,6 +117,10 @@ function useInlineToggles(wide: boolean, lang: string) {
     compute()
     const observer = new ResizeObserver(compute)
     observer.observe(bar)
+    // The slot and the spacer are left out: their sizes follow the decision itself.
+    for (const child of bar.children) {
+      if (child !== slotRef.current && !child.classList.contains('tb-spacer')) observer.observe(child)
+    }
     return () => observer.disconnect()
   }, [wide, lang])
 

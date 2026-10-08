@@ -36,10 +36,15 @@ export function formatHash(state: Pick<AppState, 'campus' | 'focusId' | 'program
 }
 
 /**
- * Applies the current hash to the store, then mirrors store changes back into the hash.
- * `resolve` maps codes from the URL to ids that exist in the loaded dataset (or null).
+ * Applies the current hash to the store, then mirrors store changes back into the hash with
+ * replaceState (no history entries). `resolve` maps codes from the URL to ids that exist in the
+ * loaded dataset (or null); codes that do not resolve are dropped from the URL right away.
  */
 export function startUrlSync(resolve: { course(code: string): string | null; program(code: string): string | null }): () => void {
+  const mirror = () => {
+    const next = formatHash(appStore.get())
+    if (next !== window.location.hash) window.history.replaceState(null, '', next)
+  }
   const apply = () => {
     const url = parseHash(window.location.hash)
     const patch: Partial<AppState> = {
@@ -50,14 +55,12 @@ export function startUrlSync(resolve: { course(code: string): string | null; pro
     if (patch.focusId) patch.panel = 'course'
     else if (patch.programId) patch.panel = 'program'
     appStore.set(patch)
+    mirror()
   }
   apply()
   window.addEventListener('hashchange', apply)
 
-  const unsubscribe = appStore.subscribe(() => {
-    const next = formatHash(appStore.get())
-    if (next !== window.location.hash) window.history.replaceState(null, '', next)
-  })
+  const unsubscribe = appStore.subscribe(mirror)
   return () => {
     window.removeEventListener('hashchange', apply)
     unsubscribe()

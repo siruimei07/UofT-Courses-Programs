@@ -1,9 +1,11 @@
-// Subject-code bullet in the lane's division tone (design-spec 7.7). Lanes alternate tone 1 and
-// tone 2 inside their division in static display order, matching the lane bars on the map.
+// Subject-code bullet in the lane's division tone (design-spec 7.7, owner decision 19.8). A
+// subject's tone is the graph core's `laneTone` (alternating inside its division in static lane
+// order), so search, the subject picker, the start strip and the lane column always agree and no
+// filter ever recolours a subject.
 import type { CSSProperties } from 'react'
+import { laneBulletInkVar, laneDivision, laneToneVar } from '../graph/tokens'
+import { laneTone } from '../graph/topology'
 import type { Topology } from '../graph/types'
-
-const DIVISIONS = new Set(['sciences', 'social-sciences', 'humanities', 'professional', 'interdisciplinary'])
 
 export interface SubjectTone {
   division: string
@@ -11,24 +13,22 @@ export interface SubjectTone {
 }
 
 export function subjectTones(topology: Topology): Map<string, SubjectTone> {
-  const seen = new Map<string, number>()
   const tones = new Map<string, SubjectTone>()
   for (const lane of topology.lanes) {
-    const division = DIVISIONS.has(lane.division) ? lane.division : 'interdisciplinary'
-    const count = seen.get(division) ?? 0
-    seen.set(division, count + 1)
-    tones.set(lane.subject, { division, tone: count % 2 === 0 ? 1 : 2 })
+    tones.set(lane.subject, { division: laneDivision(lane.division), tone: laneTone(topology, lane.index) })
   }
   return tones
 }
 
+const FALLBACK: SubjectTone = { division: laneDivision(''), tone: 1 }
+
 export function toneStyle(tone: SubjectTone | undefined): CSSProperties {
-  const { division, tone: n } = tone ?? { division: 'interdisciplinary', tone: 1 }
-  return { background: `var(--lane-${division}-${n})`, color: `var(--lane-bullet-ink-${n})` }
+  const { division, tone: n } = tone ?? FALLBACK
+  return { background: laneToneVar(division, n), color: laneBulletInkVar(n) }
 }
 
 export function divisionBar(division: string): string {
-  return `var(--lane-${DIVISIONS.has(division) ? division : 'interdisciplinary'}-1)`
+  return laneToneVar(division, 1)
 }
 
 export function SubjectBullet({ code, tone }: { code: string; tone: SubjectTone | undefined }) {

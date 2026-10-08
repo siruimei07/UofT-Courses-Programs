@@ -1,16 +1,14 @@
 // The graph pipeline for the current app state, memoised stage by stage (design-spec 16.1):
-//   record → eligibility → presentation (chain titles auto, 8.2) → geometry → routes.
+//   record → eligibility → presentation + geometry (chain titles auto, 8.2) → routes.
 // Topology, engine and the label measurer are built by the caller once per dataset.
 import { useMemo } from 'react'
 import type { GraphCourse, GraphDataset } from '../data/schema'
 import type { CourseEngine } from '../domain/engine-types'
 import type { PlotSize } from '../graph/canvas-types'
-import { computeGeometry } from '../graph/geometry'
-import { computePresentation } from '../graph/presentation'
 import { computeRoutes } from '../graph/routes'
 import type { LabelMeasurer } from '../graph/text'
-import type { Eligibility, Geometry, Presentation, PresentationInput, RecordStatus, Routes, Topology } from '../graph/types'
-import { boxFitsPlot, chainBox } from './framing'
+import type { Eligibility, Geometry, Presentation, RecordStatus, Routes, Topology } from '../graph/types'
+import { chainTitlesAuto, resolveChainTitles, type ChainTitles, type ChainTitlesBase } from './chainTitles'
 import { anyGroupsOf } from './readout'
 import { useApp } from './store'
 
@@ -21,7 +19,7 @@ export interface GraphModel {
   /** Focus node index, or -1. */
   focusIndex: number
   focusCourse: GraphCourse | null
-  chainTitles: PresentationInput['chainTitles']
+  chainTitles: ChainTitles
   /** Eligibility per course id for the current record (null when the record is empty). */
   eligibility: ReadonlyMap<string, Eligibility> | null
 }
@@ -55,7 +53,7 @@ export function useGraphModel(
   }, [record])
   const eligibility = useMemo(() => (record.size ? engine.eligibility(record) : null), [engine, record])
 
-  const base = useMemo<Omit<PresentationInput, 'chainTitles'>>(() => ({
+  const base = useMemo<ChainTitlesBase>(() => ({
     focusId, depth, hideUnrelated, hideCompleted, showAllEdges, levels, subjects, programIds,
     record: statuses, eligibility, titles,
   }), [focusId, depth, hideUnrelated, hideCompleted, showAllEdges, levels, subjects, programIds, statuses, eligibility, titles])
@@ -63,24 +61,14 @@ export function useGraphModel(
   const focusIndex = focusId ? topology.indexById.get(focusId) ?? -1 : -1
   // The focus row height follows the plate's wrapped title lines, which only the text module knows.
   const extras = useMemo(() => (focusIndex >= 0 ? { focusLines: measure.plate(focusIndex, 'world').lines.length } : {}), [measure, focusIndex])
-  // Chain titles only matter for transitive chain nodes: a focus, depth 'all' and Titles off.
-  const auto = focusIndex >= 0 && depth === 'all' && !titles
-
-  const allPresentation = useMemo(() => computePresentation(topology, { ...base, chainTitles: 'all' }), [topology, base])
-  const allGeometry = useMemo(() => computeGeometry(topology, allPresentation, measure, extras), [topology, allPresentation, measure, extras])
-  const fitsAll = useMemo(() => !auto || boxFitsPlot(chainBox(allPresentation, allGeometry), plot), [auto, allPresentation, allGeometry, plot])
-
-  const directPresentation = useMemo(
-    () => (fitsAll ? null : computePresentation(topology, { ...base, chainTitles: 'direct' })),
-    [fitsAll, topology, base],
+  // The plot size only matters while chain titles are automatic: resizing the overview never
+  // rebuilds the presentation.
+  const titlesPlot = chainTitlesAuto(base, focusIndex) ? plot : null
+  const resolved = useMemo(
+    () => resolveChainTitles(topology, base, focusIndex, measure, titlesPlot, extras),
+    [topology, base, focusIndex, measure, titlesPlot, extras],
   )
-  const directGeometry = useMemo(
-    () => (directPresentation ? computeGeometry(topology, directPresentation, measure, extras) : null),
-    [directPresentation, topology, measure, extras],
-  )
-
-  const presentation = directPresentation ?? allPresentation
-  const geometry = directGeometry ?? allGeometry
+  const { presentation, geometry, chainTitles } = resolved
   const focusCourse = focusId ? courseById.get(focusId) ?? null : null
 
   const anyGroups = useMemo(
@@ -89,8 +77,5 @@ export function useGraphModel(
   )
   const routes = useMemo(() => computeRoutes(topology, presentation, geometry, { anyGroups }), [topology, presentation, geometry, anyGroups])
 
-  return {
-    presentation, geometry, routes, focusIndex, focusCourse, eligibility,
-    chainTitles: directPresentation ? 'direct' : 'all',
-  }
+  return { presentation, geometry, routes, focusIndex, focusCourse, eligibility, chainTitles }
 }

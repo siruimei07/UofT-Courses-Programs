@@ -1,9 +1,12 @@
-// First-visit start strip (design-spec 6.3 item 4): search hint, start-subject chips and a link to
-// the full subject picker.
+// First-visit start strip (design-spec 6.3 item 4): search hint, up to 6 start-subject chips (each
+// carries the subject bullet) and a link to the full subject picker.
 import type { SubjectInfo } from '../data/schema'
 import { format, useStrings } from '../i18n'
 import { cardStrings } from './strings'
-import { toneStyle, type SubjectTone } from './SubjectBullet'
+import { SubjectBullet, type SubjectTone } from './SubjectBullet'
+
+/** 6.3: up to 6 subject chips. */
+export const START_CHIPS = 6
 
 interface StartStripProps {
   subjects: readonly SubjectInfo[]
@@ -17,11 +20,10 @@ export function StartStrip({ subjects, tones, onJump, onAllSubjects }: StartStri
   return (
     <div className="start-strip">
       <span className="start-text" title={t.start}>{t.start}</span>
-      {subjects.map(subject => (
+      {subjects.slice(0, START_CHIPS).map(subject => (
         <button key={subject.code} type="button" className="chip chip-subject" title={format(t.jumpTo, { name: subject.name })}
           onClick={() => onJump(subject.code)}>
-          <span className="chip-swatch" style={{ background: toneStyle(tones.get(subject.code)).background }} aria-hidden="true" />
-          <span lang="en">{subject.code}</span>
+          <SubjectBullet code={subject.code} tone={tones.get(subject.code)} />
         </button>
       ))}
       <button type="button" className="link-button" onClick={onAllSubjects}>{t.allSubjects}</button>
