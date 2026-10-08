@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>UofT Course Map</title>
+    <meta name="description" content="Unofficial planning tool: every University of Toronto Mississauga course on one prerequisite map. See what a course needs and unlocks, highlight a program and track the courses you have taken." />
+    <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#151a20" media="(prefers-color-scheme: dark)" />
+    <meta name="color-scheme" content="light dark" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <script>
+      // Apply the stored theme and language before the first paint (startThemeSync / startLangSync
+      // take over once the app runs). Storage may be unavailable; the defaults then apply.
+      try {
+        var prefs = JSON.parse(localStorage.getItem('uoft-course-map:prefs:v1') || '{}') || {}
+        if (prefs.theme === 'light' || prefs.theme === 'dark') document.documentElement.dataset.theme = prefs.theme
+        if (prefs.lang === 'zh') document.documentElement.lang = 'zh-CN'
+      } catch (error) {
+        // Ignore: first paint follows prefers-color-scheme.
+      }
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <noscript>UofT Course Map needs JavaScript to draw the prerequisite map.</noscript>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

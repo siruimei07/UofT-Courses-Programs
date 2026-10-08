@@ -117,6 +117,13 @@ export const actions = {
   openPanel(panel: PanelId) {
     appStore.set({ panel })
   },
+  /** Opens a tab and expands the panel if it was collapsed to its rail. */
+  showPanel(panel: Exclude<PanelId, null>) {
+    appStore.set({ panel, panelCollapsed: false })
+  },
+  setPanelCollapsed(panelCollapsed: boolean) {
+    appStore.set({ panelCollapsed })
+  },
   setDepth(depth: Depth) {
     appStore.set({ depth })
   },
@@ -126,8 +133,9 @@ export const actions = {
   setLevels(levels: ReadonlySet<number> | null) {
     appStore.set({ levels: levels && levels.size ? levels : null })
   },
+  /** null = all subjects; an empty set is kept ("None" in the subject picker, then pick some). */
   setSubjects(subjects: ReadonlySet<string> | null) {
-    appStore.set({ subjects: subjects && subjects.size ? subjects : null })
+    appStore.set({ subjects })
   },
   setRecord(courseId: string, entry: RecordEntry | null) {
     appStore.set(state => {

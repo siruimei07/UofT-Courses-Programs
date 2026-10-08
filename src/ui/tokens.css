@@ -1,0 +1,214 @@
+/* Design tokens (design-spec 3.1 and 4.1). The canvas renderer reads the same properties through
+   getComputedStyle(document.documentElement); only the semantic --node-* / --edge-* aliases are
+   read by renderer code. startThemeSync sets <html data-theme="light|dark">; the
+   prefers-color-scheme block repeats the dark values so the first paint is right before JS runs. */
+
+:root {
+  /* typography (4.1): no web fonts are loaded */
+  --font-ui: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  --font-display: "Segoe UI Variable Display", "Segoe UI", system-ui, sans-serif;
+  --font-zh: "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC", "Noto Sans SC", sans-serif;
+
+  /* surfaces */
+  --page: #f2f3f5;          /* app background behind cards */
+  --surface: #ffffff;       /* header, cards, graph background, even bands */
+  --surface-2: #f7f8fa;     /* official-text blocks, legend strip, tab bar */
+  --band: #f5f6f8;          /* odd level bands (200, 400) wash */
+  --field: #ffffff;         /* inputs, segmented-control tracks */
+  --hover: #f0f2f4;         /* hover fill for chips, rows, buttons */
+  --line: #e1e4e8;          /* borders, lane separators, header rules */
+  --line-soft: #eceef1;     /* inner dividers, progress track */
+  --rule-strong: #c9ced5;   /* division separators (1.5 px) */
+
+  /* ink */
+  --ink: #16191d;           /* primary text, pressed chips, selected ring */
+  --ink-2: #4a525b;         /* titles, secondary text */
+  --ink-3: #646c75;         /* meta text (>= 4.5:1 on every surface) */
+  --ink-inverse: #ffffff;   /* text on --ink fills */
+  --focus-ring: #1d4fc9;
+  --danger: #b42318;
+  --live: #2f8a62;          /* status-pill dot */
+
+  /* base hues */
+  --dot: #2f8a62;           /* reference green: "a course" */
+  --mini: #bcc2c9;
+  --pre: #1d4fc9;           /* prerequisites (blue): dots, direct edges */
+  --pre-ink: #1d4fc9;       /* blue text */
+  --pre-soft: #6187da;      /* transitive prerequisite edges */
+  --unl: #9250e0;           /* unlocks (violet): dots, direct edges; lighter than --pre on purpose */
+  --unl-ink: #6e2fc4;       /* violet text */
+  --unl-soft: #ad88ea;      /* transitive unlock edges */
+  --prog: #b45309;          /* program text and program edges (amber, reserved) */
+  --prog-ring: #d97706;     /* program dot fill and rings */
+  --prog-wash: rgba(217, 119, 6, 0.10);
+  --rec: #3b4450;           /* record glyphs when the node has no relation colour */
+  --ready: #2f8a62;         /* "available now" ring */
+
+  /* selection */
+  --sel: #16191d;           /* selected ring and centre */
+  --sel-plate: #16191d;     /* inverted label plate */
+  --sel-plate-ink: #ffffff;
+  --sel-wash: rgba(22, 25, 29, 0.035);  /* row and column wash */
+  --sel-glow: transparent;  /* dark mode only */
+
+  /* edges (all opaque; widths in section 7.4) */
+  --edge-faint: #bfc5cc;    /* overview links, stubs, "show all connections" */
+  --edge-hover: #8a929b;    /* hover preview of one node's links */
+
+  /* lanes: two alternating tones per division (section 7.7) */
+  --lane-sciences-1: #0b7c86;       --lane-sciences-2: #2a96a0;
+  --lane-social-sciences-1: #c0283e; --lane-social-sciences-2: #d9566a;
+  --lane-humanities-1: #a3367a;     --lane-humanities-2: #c6659f;
+  --lane-professional-1: #7b5a2e;   --lane-professional-2: #a27f4c;
+  --lane-interdisciplinary-1: #5f6b7a; --lane-interdisciplinary-2: #7f8a98;
+  --lane-bullet-ink-1: #ffffff;     /* text on tone 1 */
+  --lane-bullet-ink-2: #16191d;     /* text on tone 2 */
+
+  /* semantic node tokens (what the renderer reads) */
+  --node-default: var(--dot);
+  --node-mini: var(--mini);
+  --node-selected-ring: var(--sel);
+  --node-prereq-direct: var(--pre);
+  --node-prereq-transitive: var(--pre);     /* stroke of the hollow dot */
+  --node-unlock-direct: var(--unl);
+  --node-unlock-transitive: var(--unl);
+  --node-program: var(--prog-ring);
+  --node-completed: var(--rec);             /* used when the node has no relation colour */
+  --node-in-progress: var(--rec);
+  --node-planned: var(--rec);
+  --node-available: var(--ready);
+
+  /* semantic edge tokens */
+  --edge-prereq-direct: var(--pre);
+  --edge-prereq-transitive: var(--pre-soft);
+  --edge-unlock-direct: var(--unl);
+  --edge-unlock-transitive: var(--unl-soft);
+  --edge-program: var(--prog);
+  --edge-unrelated: var(--edge-faint);
+
+  /* elevation */
+  --shadow-card: 0 1px 2px rgba(20, 24, 28, 0.05), 0 1px 1px rgba(20, 24, 28, 0.03);
+  --shadow-pop: 0 8px 28px rgba(20, 24, 28, 0.14), 0 1px 3px rgba(20, 24, 28, 0.08);
+  --shadow-pill: 0 2px 8px rgba(20, 24, 28, 0.10);
+  color-scheme: light;
+}
+
+/* Chinese UI: append the zh faces to the UI and display stacks (4.1). */
+:root[lang="zh-CN"] {
+  --font-ui: "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC", "Noto Sans SC", system-ui, sans-serif;
+  --font-display: "Segoe UI Variable Display", "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC", "Noto Sans SC", system-ui, sans-serif;
+}
+
+:root[data-theme="dark"] {
+  --page: #0f1216;
+  --surface: #151a20;
+  --surface-2: #181e25;
+  --band: #1a2028;
+  --field: #11151a;
+  --hover: #1f262e;
+  --line: #2a313a;
+  --line-soft: #222830;
+  --rule-strong: #3a434e;
+
+  --ink: #e8ecf1;
+  --ink-2: #b4bcc6;
+  --ink-3: #8e98a4;
+  --ink-inverse: #0f1216;
+  --focus-ring: #8fb5ff;
+  --danger: #ff8f80;
+  --live: #4cb487;
+
+  --dot: #4cb487;
+  --mini: #424b57;
+  --pre: #5e8ef5;
+  --pre-ink: #8fb5ff;
+  --pre-soft: #4a72b8;
+  --unl: #c3a0ff;
+  --unl-ink: #c9a9ff;
+  --unl-soft: #9479d0;
+  --prog: #f0a43a;
+  --prog-ring: #e0952c;
+  --prog-wash: rgba(240, 164, 58, 0.12);
+  --rec: #c3cbd5;
+  --ready: #4cb487;
+
+  --sel: #f2f5f8;
+  --sel-plate: #e8ecf1;
+  --sel-plate-ink: #0f1216;
+  --sel-wash: rgba(232, 236, 241, 0.05);
+  --sel-glow: rgba(242, 245, 248, 0.30);
+
+  --edge-faint: #404a56;
+  --edge-hover: #7b8592;
+
+  --lane-sciences-1: #3fb7c2;       --lane-sciences-2: #2a8e98;
+  --lane-social-sciences-1: #f07285; --lane-social-sciences-2: #d45d6c;
+  --lane-humanities-1: #df7fb6;     --lane-humanities-2: #c0649b;
+  --lane-professional-1: #c9a06a;   --lane-professional-2: #a07c4a;
+  --lane-interdisciplinary-1: #9aa5b3; --lane-interdisciplinary-2: #77828f;
+  --lane-bullet-ink-1: #0f1216;
+  --lane-bullet-ink-2: #0f1216;
+
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.35);
+  --shadow-pop: 0 10px 30px rgba(0, 0, 0, 0.50), 0 1px 3px rgba(0, 0, 0, 0.40);
+  --shadow-pill: 0 2px 10px rgba(0, 0, 0, 0.45);
+  color-scheme: dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --page: #0f1216;
+    --surface: #151a20;
+    --surface-2: #181e25;
+    --band: #1a2028;
+    --field: #11151a;
+    --hover: #1f262e;
+    --line: #2a313a;
+    --line-soft: #222830;
+    --rule-strong: #3a434e;
+
+    --ink: #e8ecf1;
+    --ink-2: #b4bcc6;
+    --ink-3: #8e98a4;
+    --ink-inverse: #0f1216;
+    --focus-ring: #8fb5ff;
+    --danger: #ff8f80;
+    --live: #4cb487;
+
+    --dot: #4cb487;
+    --mini: #424b57;
+    --pre: #5e8ef5;
+    --pre-ink: #8fb5ff;
+    --pre-soft: #4a72b8;
+    --unl: #c3a0ff;
+    --unl-ink: #c9a9ff;
+    --unl-soft: #9479d0;
+    --prog: #f0a43a;
+    --prog-ring: #e0952c;
+    --prog-wash: rgba(240, 164, 58, 0.12);
+    --rec: #c3cbd5;
+    --ready: #4cb487;
+
+    --sel: #f2f5f8;
+    --sel-plate: #e8ecf1;
+    --sel-plate-ink: #0f1216;
+    --sel-wash: rgba(232, 236, 241, 0.05);
+    --sel-glow: rgba(242, 245, 248, 0.30);
+
+    --edge-faint: #404a56;
+    --edge-hover: #7b8592;
+
+    --lane-sciences-1: #3fb7c2;       --lane-sciences-2: #2a8e98;
+    --lane-social-sciences-1: #f07285; --lane-social-sciences-2: #d45d6c;
+    --lane-humanities-1: #df7fb6;     --lane-humanities-2: #c0649b;
+    --lane-professional-1: #c9a06a;   --lane-professional-2: #a07c4a;
+    --lane-interdisciplinary-1: #9aa5b3; --lane-interdisciplinary-2: #77828f;
+    --lane-bullet-ink-1: #0f1216;
+    --lane-bullet-ink-2: #0f1216;
+
+    --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.35);
+    --shadow-pop: 0 10px 30px rgba(0, 0, 0, 0.50), 0 1px 3px rgba(0, 0, 0, 0.40);
+    --shadow-pill: 0 2px 10px rgba(0, 0, 0, 0.45);
+    color-scheme: dark;
+  }
+}
