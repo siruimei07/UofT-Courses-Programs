@@ -1,7 +1,9 @@
 // Shared Playwright fixtures and helpers for the end-to-end suite (design-spec 16.2). Every test
 // runs in a fresh browser context, so localStorage starts empty: a plain open is a first visit.
-// Selectors prefer roles and accessible names; CSS hooks are used only for the canvas overlays,
-// which carry no roles (lane column, band bar, edge pills, live region).
+// Every project except `motion` emulates prefers-reduced-motion: reduce (playwright.config.ts), so
+// the canvas jumps straight to each end state. Selectors prefer roles and accessible names; CSS
+// hooks are used only for the canvas overlays, which carry no roles (lane column, band bar, edge
+// pills, live region).
 import { test as base, expect, type Locator, type Page, type TestInfo } from '@playwright/test'
 
 export { expect }
